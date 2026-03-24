@@ -32,7 +32,7 @@ RUN git clone --depth=1 https://github.com/zlib-ng/zlib-ng.git && \
 RUN wget -qO- https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz | tar -zxf - && \
     cd zstd-1.5.6 && CFLAGS="${CPU_FLAGS}" make -j$(nproc) && make install PREFIX=/usr/local
 
-# 5. Brotli & Zstd 모듈 소스 + [🔥 Brotli 라이브러리 빌드]
+# 5. Brotli & Zstd 모듈 소스 + [Brotli 라이브러리 빌드]
 RUN git clone --depth=1 --recurse-submodules https://github.com/google/ngx_brotli.git && \
     cd /tmp/ngx_brotli/deps/brotli && \
     mkdir -p out && \
@@ -41,7 +41,7 @@ RUN git clone --depth=1 --recurse-submodules https://github.com/google/ngx_brotl
     cd /tmp && \
     git clone --depth=1 https://github.com/HanadaLee/ngx_http_zstd_module.git
 
-# 6. Nginx 본체 빌드 (HTTP/3 + QuicTLS + Zen 3)
+# 6. Nginx 본체 빌드 (HTTP/3 + RealIP + Zen 3)
 RUN curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" | tar -zxf - && mv "nginx-${NGINX_VERSION}" nginx
 WORKDIR /tmp/nginx
 
@@ -62,6 +62,8 @@ RUN ./configure \
     --with-http_v2_module \
     --with-http_v3_module \
     --with-http_ssl_module \
+    --with-http_realip_module \
+    --with-http_stub_status_module \
     --with-http_gzip_static_module \
     --with-openssl=/tmp/quictls \
     --add-dynamic-module=/tmp/ngx_brotli \
@@ -76,28 +78,26 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcre2-8-0 ca-certificates libbrotli1 libzstd1 && rm -rf /var/lib/apt/lists/*
 
-# [🔥 핵심 1] 바이너리와 모듈 복사
+# 바이너리와 모듈 복사
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /usr/lib/nginx/modules /usr/lib/nginx/modules
 
-# [🔥 핵심 2] 필수 설정 파일(mime.types 등) 통째로 복사
+# 필수 설정 파일(mime.types 등)과 로그 폴더 준비
 COPY --from=builder /etc/nginx /etc/nginx
-
-# [🔥 핵심 3] Nginx가 에러를 내지 않도록 로그 폴더 미리 생성
 RUN mkdir -p /etc/nginx/logs && touch /etc/nginx/logs/error.log && chmod -R 755 /etc/nginx/logs
 
-# [🔥 핵심 4] 최적화 라이브러리 복사
+# 최적화 라이브러리 복사
 COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
 COPY --from=builder /usr/local/lib/libz.so.1.* /usr/local/lib/libz-ng.so
 
 # 시스템 라이브러리 경로 업데이트
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/custom-libs.conf && ldconfig
 
-# [Zen 3 최적화 환경 변수]
+# [Zen 3 최적화 심장 주입]
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2:/usr/local/lib/libz-ng.so" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
 
 LABEL project="JBS Networks 4.0 Ultra" \
-      optimization="Zen3/QuicTLS/HTTP3/Zstd/Brotli/Jemalloc"
+      optimization="Zen3/QuicTLS/HTTP3/RealIP/Zstd/Brotli/Jemalloc"
 
 CMD ["nginx", "-g", "daemon off;"]
