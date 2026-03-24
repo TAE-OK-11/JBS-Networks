@@ -4,7 +4,7 @@ ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBU
 ARG LTO_FLAGS="-flto"
 
 #####################################################
-### Stage 1: 모든 부품 소스 빌드 및 조립
+### Stage 1: 모든 부품 소스 빌드 및 조립 (Builder)
 FROM debian:trixie-slim AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
@@ -32,8 +32,7 @@ RUN git clone --depth=1 https://github.com/zlib-ng/zlib-ng.git && \
 RUN wget -qO- https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz | tar -zxf - && \
     cd zstd-1.5.6 && CFLAGS="${CPU_FLAGS}" make -j$(nproc) && make install PREFIX=/usr/local
 
-# 5. Brotli & Zstd 모듈 소스 + [🔥 핵심: 브로틀리 라이브러리 직접 빌드]
-# Nginx가 조립할 수 있게 브로틀리 엔진 부품을 먼저 시스템에 깔아줍니다.
+# 5. Brotli & Zstd 모듈 소스 + [🔥 Brotli 라이브러리 빌드]
 RUN git clone --depth=1 --recurse-submodules https://github.com/google/ngx_brotli.git && \
     cd /tmp/ngx_brotli/deps/brotli && \
     mkdir -p out && \
@@ -53,6 +52,10 @@ RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
     --modules-path=/usr/lib/nginx/modules \
+    --conf-path=/etc/nginx/nginx.conf \
+    --error-log-path=/etc/nginx/logs/error.log \
+    --http-log-path=/etc/nginx/logs/access.log \
+    --pid-path=/var/run/nginx.pid \
     --with-pcre-jit \
     --with-threads \
     --with-file-aio \
@@ -68,21 +71,29 @@ RUN ./configure \
     make -j$(nproc) && make install && strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so
 
 #####################################################
-### Stage 2: 최종 런타임 이미지 (가볍고 빠름)
+### Stage 2: 최종 런타임 이미지 (Runtime)
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcre2-8-0 ca-certificates libbrotli1 libzstd1 && rm -rf /var/lib/apt/lists/*
 
-# 빌드 결과물만 쏙 빼오기
+# [🔥 핵심 1] 바이너리와 모듈 복사
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /usr/lib/nginx/modules /usr/lib/nginx/modules
+
+# [🔥 핵심 2] 필수 설정 파일(mime.types 등) 통째로 복사
+COPY --from=builder /etc/nginx /etc/nginx
+
+# [🔥 핵심 3] Nginx가 에러를 내지 않도록 로그 폴더 미리 생성
+RUN mkdir -p /etc/nginx/logs && touch /etc/nginx/logs/error.log && chmod -R 755 /etc/nginx/logs
+
+# [🔥 핵심 4] 최적화 라이브러리 복사
 COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
 COPY --from=builder /usr/local/lib/libz.so.1.* /usr/local/lib/libz-ng.so
 
 # 시스템 라이브러리 경로 업데이트
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/custom-libs.conf && ldconfig
 
-# [Zen 3 최적화 심장 주입]
+# [Zen 3 최적화 환경 변수]
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2:/usr/local/lib/libz-ng.so" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
 
