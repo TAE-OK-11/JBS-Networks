@@ -1,73 +1,110 @@
+# syntax=docker/dockerfile:1
+ARG NGINX_VERSION=1.29.0
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC"
+ARG LTO_FLAGS="-flto=auto"
+
+# ---------------------------------------------------
+# Stage 1: 모든 부품 소스 빌드 및 조립 (Builder)
+# ---------------------------------------------------
 FROM debian:trixie-slim AS builder
+ARG CPU_FLAGS
+ARG LTO_FLAGS
+ARG NGINX_VERSION
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV CFLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -flto=auto -fPIC -DNDEBUG -I/usr/local/include"
-ENV LDFLAGS="-flto=auto -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake wget curl perl ca-certificates binutils \
+    libpcre2-dev pkg-config git && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y \
-    build-essential cmake git wget libpcre2-dev \
-    libjemalloc-dev golang perl zlib1g-dev
+WORKDIR /tmp
 
-WORKDIR /build
-
-RUN git clone --depth=1 -b openssl-3.1.5+quic https://github.com/quictls/openssl.git quictls && \
+# 1. QuicTLS (OpenSSL for QUIC) - LTO 및 CPU 플래그 강제 주입
+RUN curl -L https://github.com/quictls/openssl/archive/openssl-3.1.5-quic1.tar.gz | tar -zxf - && mv openssl-* quictls && \
     cd quictls && \
-    ./config --prefix=/tmp/quictls --libdir=lib enable-tls1_3 && \
+    ./config --prefix=/tmp/quictls --libdir=lib enable-tls1_3 ${CPU_FLAGS} ${LTO_FLAGS} && \
     make -j$(nproc) && make install
 
-RUN git clone --depth=1 https://github.com/google/ngx_brotli.git && \
-    cd ngx_brotli && git submodule update --init
+# 2. jemalloc (메모리 최적화) - LTO 및 CPU 플래그 강제 주입
+RUN wget -qO- https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2 | tar -xjf - && \
+    cd jemalloc-5.3.0 && \
+    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" CXXFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" LDFLAGS="${LTO_FLAGS}" \
+    ./configure --prefix=/usr/local --enable-stats --disable-cxx && make -j$(nproc) && make install
 
-RUN git clone --depth=1 https://github.com/tokers/zstd-nginx-module.git
-
+# 3. zlib-ng (압축 가속) - LTO 플래그 주입
 RUN git clone --depth=1 https://github.com/zlib-ng/zlib-ng.git && \
-    cd zlib-ng && \
-    ./configure --zlib-compat && \
-    make -j$(nproc) && make install
+    cd zlib-ng && cmake -B build -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" -DZLIB_COMPAT=ON -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build build --config Release -j$(nproc) && cmake --install build
 
-RUN wget https://nginx.org/download/nginx-1.29.0.tar.gz && \
-    tar -zxf nginx-1.29.0.tar.gz
+# 4. Zstd (고성능 압축 라이브러리) - LTO 플래그 주입
+RUN wget -qO- https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz | tar -zxf - && \
+    cd zstd-1.5.6 && CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" LDFLAGS="${LTO_FLAGS}" make -j$(nproc) && make install PREFIX=/usr/local
 
-WORKDIR /build/nginx-1.29.0
+# 5. Brotli & Zstd 모듈 소스 + [Brotli 라이브러리 빌드] - LTO 플래그 주입
+RUN git clone --depth=1 --recurse-submodules https://github.com/google/ngx_brotli.git && \
+    cd /tmp/ngx_brotli/deps/brotli && \
+    mkdir -p out && \
+    cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" -DCMAKE_INSTALL_PREFIX=/usr/local . && \
+    make -j$(nproc) && make install && \
+    cd /tmp && \
+    git clone --depth=1 https://github.com/HanadaLee/ngx_http_zstd_module.git
+
+# 6. Nginx 본체 빌드 (HTTP/3 + RealIP + Zen 3)
+RUN curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" | tar -zxf - && mv "nginx-${NGINX_VERSION}" nginx
+WORKDIR /tmp/nginx
+
+# Zstd 모듈 링킹 에러 방지 패치
+RUN sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config
 
 RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
     --modules-path=/usr/lib/nginx/modules \
     --conf-path=/etc/nginx/nginx.conf \
+    --error-log-path=/etc/nginx/logs/error.log \
+    --http-log-path=/etc/nginx/logs/access.log \
+    --pid-path=/var/run/nginx.pid \
+    --with-pcre-jit \
+    --with-threads \
+    --with-file-aio \
     --with-http_v2_module \
     --with-http_v3_module \
     --with-http_ssl_module \
     --with-http_realip_module \
-    --with-pcre-jit \
-    --with-threads \
-    --with-file-aio \
-    --with-openssl=/build/quictls \
-    --add-dynamic-module=/build/ngx_brotli \
-    --add-dynamic-module=/build/zstd-nginx-module \
-    --with-cc-opt="${CFLAGS}" \
-    --with-ld-opt="${LDFLAGS}" && \
-    make -j$(nproc) && \
-    make install
+    --with-http_stub_status_module \
+    --with-http_gzip_static_module \
+    --with-openssl=/tmp/quictls \
+    --add-dynamic-module=/tmp/ngx_brotli \
+    --add-dynamic-module=/tmp/ngx_http_zstd_module \
+    --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/usr/local/include" \
+    --with-ld-opt="${LTO_FLAGS} -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed" && \
+    make -j$(nproc) && make install && strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so
 
-RUN strip -s /usr/sbin/nginx && \
-    strip -s /usr/lib/nginx/modules/*.so
-
+# ---------------------------------------------------
+# Stage 2: 최종 런타임 이미지 (Runtime)
+# ---------------------------------------------------
 FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpcre2-8-0 ca-certificates libbrotli1 libzstd1 && rm -rf /var/lib/apt/lists/*
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
-
-RUN apt-get update && apt-get install -y \
-    libjemalloc2 libpcre2-8-0 zlib1g && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
+# 바이너리와 모듈 복사
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /usr/lib/nginx/modules /usr/lib/nginx/modules
+
+# 필수 설정 파일(mime.types 등)과 로그 폴더 준비
 COPY --from=builder /etc/nginx /etc/nginx
-COPY --from=builder /usr/local/lib /usr/local/lib
+RUN mkdir -p /etc/nginx/logs && touch /etc/nginx/logs/error.log && chmod -R 755 /etc/nginx/logs
 
-RUN mkdir -p /var/cache/nginx/navidrome /var/log/nginx
+# 최적화 라이브러리 복사
+COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
+COPY --from=builder /usr/local/lib/libz.so.1.* /usr/local/lib/libz-ng.so
 
-EXPOSE 80 443 443/udp
+# 시스템 라이브러리 경로 업데이트
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/custom-libs.conf && ldconfig
+
+# [Zen 3 최적화 심장 주입]
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2:/usr/local/lib/libz-ng.so" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
+
+LABEL project="JBS Networks 4.0 Ultra" \
+      optimization="Zen3/QuicTLS/HTTP3/RealIP/Zstd/Brotli/Jemalloc/Full-LTO"
 
 CMD ["nginx", "-g", "daemon off;"]
