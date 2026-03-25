@@ -4,18 +4,23 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'nginx/**'
+      - 'nginx/**' # nginx 폴더가 바뀔 때만 작동
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 중요: GHCR에 이미지를 쓰기 위해 권한이 필요합니다.
     permissions:
       contents: read
-      packages: write
+      packages: write # GHCR에 쓰기 권한 부여
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      # [중요] 계정명(TAE-OK-11)을 소문자(tae-ok-11)로 변환하는 단계
+      - name: Lowercase Repository Owner
+        run: echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
+        env:
+          OWNER: ${{ github.repository_owner }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -29,5 +34,5 @@ jobs:
         with:
           context: ./nginx
           push: true
-          # 주소 형식: ghcr.io/아이디/이미지명:태그
-          tags: ghcr.io/${{ github.repository_owner }}/jbs-nginx:ultra-4.0
+          # 변환된 소문자 계정명(env.OWNER_LC)을 사용합니다.
+          tags: ghcr.io/${{ env.OWNER_LC }}/jbs-nginx:ultra-4.0
