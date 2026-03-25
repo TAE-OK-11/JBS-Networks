@@ -1,48 +1,27 @@
-name: JBS-Navidrome-Ultra-Build
+name: JBS-Navidrome-Build
 
 on:
   push:
     branches: [ "main" ]
     paths:
-      - 'navidrome/**'
+      - 'navidrome/**'  # navidrome 폴더 파일이 바뀔 때만 실행
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 1. GHCR에 접근하기 위한 권한을 명시적으로 허용합니다.
-    permissions:
-      contents: read
-      packages: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. [필수] 대문자 계정명을 소문자로 변환 (로그 상의 에러 원인 해결)
-      - name: Lowercase Repository Owner
-        run: echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
-        env:
-          OWNER: ${{ github.repository_owner }}
-
-      # 3. 고성능 빌드를 위한 Buildx 설정
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
-          # navidrome 폴더 안의 Dockerfile을 사용합니다.
-          context: ./navidrome
+          context: ./navidrome  # <--- 빌드 경로를 navidrome 폴더로 지정
           push: true
-          # 소문자로 변환된 주소를 사용하여 태그를 붙입니다.
-          tags: |
-            ghcr.io/${{ env.OWNER_LC }}/jbs-navidrome:latest
-          # 빌드 속도 향상을 위한 캐시 설정
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ secrets.DOCKER_USERNAME }}/jbs-navidrome:latest
