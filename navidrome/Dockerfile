@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# [버전 설정] 최신 안정 버전으로 업데이트
+# [버전 설정] 최신 안정 버전으로 업데이트 진행됨 (2026/3/26)
 ARG NAVIDROME_REF=v0.60.3
 ARG TAGLIB_VERSION=2.2.1
 ARG JEMALLOC_VERSION=5.3.0
