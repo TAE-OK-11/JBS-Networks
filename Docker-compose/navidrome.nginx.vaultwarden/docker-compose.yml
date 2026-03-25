@@ -1,0 +1,114 @@
+name: tae00217-direct-final
+
+services:
+  nginx:
+    # 1. 깃허브에서 성공적으로 구워진 '풀옵션' 이미지를 사용합니다.
+    image: tae00217/jbs-nginx:ultra-4.0
+    container_name: nginx
+    restart: unless-stopped
+    network_mode: "host"
+    
+    # 2. [중요] 빌드 옵션(--prefix)에 따른 경로 문제를 해결하기 위한 실행 명령입니다.
+    # 설정 파일 위치를 강제 지정하고 로그를 표준 출력으로 돌려 에러를 방지합니다.
+    command: ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off; error_log /dev/stderr info;"]
+    
+    depends_on:
+      navidrome:
+        condition: service_healthy
+    volumes:
+      - /root/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt/:/etc/nginx/cert:ro
+      - /root/nginx/conf/cloudflare-ips.conf:/etc/nginx/cloudflare-ips.conf:ro
+      - /root/nginx/conf/bunny-ips.conf:/etc/nginx/bunny-ips.conf:ro
+      - /root/nginx/cache:/var/cache/nginx
+      - /dev/hugepages:/dev/hugepages
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      nproc: 65535
+      memlock: -1
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    logging:
+      driver: "local"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        max-size: "10m"
+        max-file: "3"
+
+  navidrome:
+    build:
+      context: /root/navidrome
+      dockerfile: Dockerfile
+    image: navidrome-jbs:znver3-0.60.3
+    container_name: navidrome
+    restart: unless-stopped
+    network_mode: "host"
+    user: "1000:1000"
+    
+    # Nginx의 depends_on 작동을 위해 헬스체크를 추가했습니다.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4533/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      
+    environment:
+      ND_SCANNER_SCHEDULE: "@every 24h"
+      ND_SCANNER_WATCHERWAIT: "0"
+      ND_SCANNER_SCANONSTARTUP: "false"
+      ND_ENABLEPPROF: "true"
+      ND_DEFAULTLANGUAGE: ko
+      ND_DEFAULTTHEME: spotify-ish
+      ND_ENABLETRANSCODINGCONFIG: "true"
+      ND_ENABLESHARING: "true"
+      ND_TRANSCODINGCACHESIZE: 5GB
+      ND_IMAGECACHESIZE: 5GB
+      ND_COVERARTNAMES: "cover.avif,cover.jpg,cover.png,folder.jpg,folder.png"
+      ND_COVERARTPRIORITY: "folder,embedded"
+      ND_LASTFM_APIKEY: ${LASTFM_API_KEY}
+      ND_LASTFM_SECRET: ${LASTFM_SECRET}
+      GOGC: "200"
+      GOMEMLIMIT: "8GiB"
+      GOMAXPROCS: "8"
+    volumes:
+      - /root/navidrome/data:/data
+      - /mnt/s3-music:/music:ro
+      - /dev/hugepages:/dev/hugepages
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+      memlock: -1
+    cap_add:
+      - IPC_LOCK
+    logging:
+      driver: "local"
+      options:
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+
+  vaultwarden:
+    image: vaultwarden/server:1.32.7
+    container_name: vaultwarden
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      LOG_FILE: /data/vaultwarden.log
+      LOG_LEVEL: info
+      DOMAIN: https://password.tae00217.cloud
+      ROCKET_PORT: "8081"
+      ROCKET_WORKERS: "20"
+    volumes:
+      - /root/vaultwarden/data:/data
+      - /dev/hugepages:/dev/hugepages
+    cap_add:
+      - IPC_LOCK
+    logging:
+      driver: "local"
+      options:
+        mode: "non-blocking"
+
