@@ -4,19 +4,19 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'nginx/**' # nginx 폴더가 바뀔 때만 작동
+      - 'nginx/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # GHCR에 쓰기 권한 부여
+      packages: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # [중요] 계정명(TAE-OK-11)을 소문자(tae-ok-11)로 변환하는 단계
+      # 1. 계정명을 강제로 소문자로 변환하여 환경 변수에 저장합니다.
       - name: Lowercase Repository Owner
         run: echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
         env:
@@ -34,5 +34,5 @@ jobs:
         with:
           context: ./nginx
           push: true
-          # 변환된 소문자 계정명(env.OWNER_LC)을 사용합니다.
+          # 2. 위에서 변환한 소문자 변수(env.OWNER_LC)를 사용합니다.
           tags: ghcr.io/${{ env.OWNER_LC }}/jbs-nginx:ultra-4.0
