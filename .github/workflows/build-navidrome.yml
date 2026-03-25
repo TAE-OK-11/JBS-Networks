@@ -4,34 +4,44 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'navidrome/**'
+      - 'navidrome/**' # navidrome 폴더 내 파일 변경 시에만 실행
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      [span_3](start_span)[span_4](start_span)packages: write # GHCR에 이미지를 업로드하기 위해 필수[span_3](end_span)[span_4](end_span)
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        [span_5](start_span)uses: actions/checkout@v4[span_5](end_span)
 
+      # [span_6](start_span)[span_7](start_span)[필수] 계정명(TAE-OK-11)을 소문자로 변환하여 환경 변수에 저장[span_6](end_span)[span_7](end_span)
+      - name: Lowercase Repository Owner
+        run: echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      # Navidrome 빌드 최적화를 위한 Buildx 설정
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        [span_8](start_span)uses: docker/login-action@v3[span_8](end_span)
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          [span_9](start_span)[span_10](start_span)registry: ghcr.io[span_9](end_span)[span_10](end_span)
+          [span_11](start_span)username: ${{ github.actor }}[span_11](end_span)
+          [span_12](start_span)password: ${{ secrets.GITHUB_TOKEN }}[span_12](end_span)
 
       - name: Build and Push
-        uses: docker/build-push-action@v5
+        [span_13](start_span)uses: docker/build-push-action@v5[span_13](end_span)
         with:
           context: ./navidrome
           push: true
+          # [span_14](start_span)[span_15](start_span)소문자로 변환된 계정명을 사용하여 태그 생성[span_14](end_span)[span_15](end_span)
           tags: |
-            ghcr.io/tae-ok-11/jbs-navidrome:latest
+            ghcr.io/${{ env.OWNER_LC }}/jbs-navidrome:latest
+            ghcr.io/${{ env.OWNER_LC }}/jbs-navidrome:v0.60.3
+          # 빌드 속도 향상을 위한 GitHub Actions 캐시 활성화
           cache-from: type=gha
           cache-to: type=gha,mode=max
