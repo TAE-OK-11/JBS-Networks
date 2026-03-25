@@ -3,6 +3,9 @@ name: JBS-Nginx-Ultra-Build
 on:
   push:
     branches: [ "main" ]
+    # 1. nginx 폴더 내의 파일이 push될 때만 이 액션이 실행되도록 제한합니다.
+    paths:
+      - 'nginx/**'
 
 jobs:
   build:
@@ -20,8 +23,7 @@ jobs:
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
-          context: .
+          # 2. 빌드할 Dockerfile이 들어있는 폴더 경로를 지정합니다.
+          context: ./nginx
           push: true
-          # ${{ secrets.DOCKER_USERNAME }} 부분은 깃허브가 알아서 태영님 아이디로 바꿔줍니다.
           tags: ${{ secrets.DOCKER_USERNAME }}/jbs-nginx:ultra-4.0
-
