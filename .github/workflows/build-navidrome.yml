@@ -4,44 +4,45 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'navidrome/**' # navidrome 폴더 내 파일 변경 시에만 실행
+      - 'navidrome/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 1. GHCR에 접근하기 위한 권한을 명시적으로 허용합니다.
     permissions:
       contents: read
-      [span_3](start_span)[span_4](start_span)packages: write # GHCR에 이미지를 업로드하기 위해 필수[span_3](end_span)[span_4](end_span)
+      packages: write
     steps:
       - name: Checkout Code
-        [span_5](start_span)uses: actions/checkout@v4[span_5](end_span)
+        uses: actions/checkout@v4
 
-      # [span_6](start_span)[span_7](start_span)[필수] 계정명(TAE-OK-11)을 소문자로 변환하여 환경 변수에 저장[span_6](end_span)[span_7](end_span)
+      # 2. [필수] 대문자 계정명을 소문자로 변환 (로그 상의 에러 원인 해결)
       - name: Lowercase Repository Owner
         run: echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
         env:
           OWNER: ${{ github.repository_owner }}
 
-      # Navidrome 빌드 최적화를 위한 Buildx 설정
+      # 3. 고성능 빌드를 위한 Buildx 설정
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
-        [span_8](start_span)uses: docker/login-action@v3[span_8](end_span)
+        uses: docker/login-action@v3
         with:
-          [span_9](start_span)[span_10](start_span)registry: ghcr.io[span_9](end_span)[span_10](end_span)
-          [span_11](start_span)username: ${{ github.actor }}[span_11](end_span)
-          [span_12](start_span)password: ${{ secrets.GITHUB_TOKEN }}[span_12](end_span)
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
-        [span_13](start_span)uses: docker/build-push-action@v5[span_13](end_span)
+        uses: docker/build-push-action@v5
         with:
+          # navidrome 폴더 안의 Dockerfile을 사용합니다.
           context: ./navidrome
           push: true
-          # [span_14](start_span)[span_15](start_span)소문자로 변환된 계정명을 사용하여 태그 생성[span_14](end_span)[span_15](end_span)
+          # 소문자로 변환된 주소를 사용하여 태그를 붙입니다.
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/jbs-navidrome:latest
-            ghcr.io/${{ env.OWNER_LC }}/jbs-navidrome:v0.60.3
-          # 빌드 속도 향상을 위한 GitHub Actions 캐시 활성화
+          # 빌드 속도 향상을 위한 캐시 설정
           cache-from: type=gha
           cache-to: type=gha,mode=max
