@@ -85,7 +85,7 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/custom-libs.conf && ldconfig
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2:/usr/local/lib/libz-ng.so" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
 
-LABEL project="JBS Networks 4.0" \
+LABEL project="JBS Networks 4.2" \
       optimization="Zen3/QuicTLS/HTTP3/RealIP/Zstd/Brotli/Jemalloc/Full-LTO"
 
 CMD ["nginx", "-g", "daemon off;"]
