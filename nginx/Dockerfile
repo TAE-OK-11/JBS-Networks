@@ -7,7 +7,6 @@ ARG CPU_FLAGS
 ARG LTO_FLAGS
 ARG NGINX_VERSION
 
-# AWS-LC 빌드에 필요한 golang과 ninja-build 추가
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl perl ca-certificates binutils \
     libpcre2-dev pkg-config git golang ninja-build && \
@@ -15,15 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# ✅ AWS-LC 소스 다운로드 및 정적 빌드 (BoringSSL 호환 구조)
+# ✅ 수정 1: AWS-LC 독립 빌드 (LTO 플래그 제외 및 /opt/awslc에 사전 설치)
+# -DCMAKE_INSTALL_LIBDIR=lib 로 라이브러리 경로를 통일합니다.
 RUN git clone --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc && \
     cd /tmp/aws-lc && \
     cmake -B build -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
-        -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-        -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" && \
-    ninja -C build
+        -DCMAKE_INSTALL_PREFIX=/opt/awslc \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
+        -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" && \
+    ninja -C build && ninja -C build install
 
 RUN wget -qO- https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2 | tar -xjf - && \
     cd jemalloc-5.3.0 && \
@@ -63,7 +65,8 @@ WORKDIR /tmp/nginx
 
 RUN sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config
 
-# NGINX 빌드 (AWS-LC 정적 링크, TFO 및 고음질 스트리밍 최적화 유지)
+# ✅ 수정 2: NGINX configure 수정
+# --with-openssl 플래그를 삭제하고, ld-opt에 미리 빌드한 AWS-LC 정적 파일(.a)을 직접 지정합니다.
 RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
@@ -84,11 +87,10 @@ RUN ./configure \
     --with-http_gzip_static_module \
     --with-http_gunzip_module \
     --with-http_slice_module \
-    --with-openssl=/tmp/aws-lc \
     --add-dynamic-module=/tmp/ngx_brotli \
     --add-dynamic-module=/tmp/ngx_http_zstd_module \
-    --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/usr/local/include" \
-    --with-ld-opt="${LTO_FLAGS} -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed" && \
+    --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
+    --with-ld-opt="${LTO_FLAGS} /opt/awslc/lib/libssl.a /opt/awslc/lib/libcrypto.a -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed" && \
     make -j$(nproc) && make install && \
     strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so
 
@@ -107,8 +109,6 @@ RUN mkdir -p /etc/nginx/logs && \
     touch /etc/nginx/logs/error.log && \
     chmod -R 755 /etc/nginx/logs
 
-# ✅ AWS-LC는 NGINX 바이너리에 내장되었으므로 libssl/libcrypto 복사가 필요 없음!
-# zlib-ng 및 jemalloc 런타임 라이브러리만 복사
 COPY --from=builder /usr/local/lib/libz.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
 
