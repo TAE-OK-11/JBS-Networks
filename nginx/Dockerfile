@@ -1,4 +1,4 @@
-ARG NGINX_VERSION=1.29.0
+ARG NGINX_VERSION=1.29.7
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC"
 ARG LTO_FLAGS="-flto=auto"
 
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-RUN curl -L https://github.com/quictls/openssl/archive/openssl-3.1.5-quic1.tar.gz | tar -zxf - && mv openssl-* quictls && \
+RUN curl -L https://github.com/quictls/openssl/archive/openssl-3.1.7-quic1.tar.gz | tar -zxf - && mv openssl-* quictls && \
     cd quictls && \
     ./config --prefix=/opt/quictls --libdir=lib enable-tls1_3 no-tests ${CPU_FLAGS} ${LTO_FLAGS} && \
     make -j$(nproc) && make install
