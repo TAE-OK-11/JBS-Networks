@@ -1,30 +1,34 @@
 # syntax=docker/dockerfile:1
 
-# [버전 설정] 최신 안정 버전으로 업데이트 진행됨 (2026/3/26)
+# [버전 설정] 최신 안정 버전 (All Debian 통일)
 ARG NAVIDROME_REF=v0.60.3
 ARG TAGLIB_VERSION=2.2.1
 ARG JEMALLOC_VERSION=5.3.0
+
+# [자원 격리] NGINX 및 시스템 코어 확보를 위한 2코어 엄격 제한
 ARG NAVIDROME_BUILD_CORES=2
-ARG GOMEMLIMIT=4.5GiB
+ARG GOMEMLIMIT=6GiB
 ARG SCANSCHEDULE=0
 
-# [최적화 설정] Zen 3 및 LTO(Link Time Optimization) 플래그 추가
+# [최적화 설정] Zen 3 전용 및 LTO 플래그
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -DNDEBUG"
-ARG LTO_FLAGS="-flto"
+ARG LTO_FLAGS="-flto=auto"
 ARG GOAMD64_VERSION=v3
 
 #####################################################
-### Stage 0: Fetch Navidrome Source
-FROM alpine:3.21 AS source
+### Stage 0: Fetch Navidrome Source (Debian 기반)
+FROM debian:trixie-slim AS source
 ARG NAVIDROME_REF
-RUN apk add --no-cache git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone --branch "${NAVIDROME_REF}" --depth=1 \
         https://github.com/navidrome/navidrome.git . && \
     git rev-parse --short HEAD > /src/.git_sha
 
 #####################################################
-### Stage 1: Build jemalloc (Zen 3 + LTO 최적화)
+### Stage 1: Build jemalloc (Zen 3 + LTO 완벽 적용)
 FROM debian:trixie-slim AS jemalloc-builder
 ARG JEMALLOC_VERSION
 ARG NAVIDROME_BUILD_CORES
@@ -38,14 +42,18 @@ RUN wget -qO jemalloc.tar.bz2 \
         "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" && \
     tar -xjf jemalloc.tar.bz2
 WORKDIR /build/jemalloc-${JEMALLOC_VERSION}
-RUN CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+
+# LDFLAGS에 LTO 플래그 명시
+RUN CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+    LDFLAGS="${LTO_FLAGS}" \
     ./configure --prefix=/usr/local --disable-cxx && \
-    make -j${NAVIDROME_BUILD_CORES:-2} install && \
+    make -j${NAVIDROME_BUILD_CORES} install && \
     strip --strip-unneeded /usr/local/lib/libjemalloc.so*
 
 #####################################################
-### Stage 2: Build UI
-FROM node:23-alpine AS jsbuilder
+### Stage 2: Build UI (Debian 기반 Node 24 LTS)
+FROM node:24-bookworm-slim AS jsbuilder
 WORKDIR /src/ui
 COPY --from=source /src/ui ./
 RUN --mount=type=cache,target=/root/.npm \
@@ -72,9 +80,9 @@ RUN wget -qO taglib.tar.gz \
     cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
           -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
           -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-          -DCMAKE_INSTALL_PREFIX=/usr/local \
-          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON . && \
-    make -j${NAVIDROME_BUILD_CORES:-2} install && ldconfig
+          -DCMAKE_SHARED_LINKER_FLAGS="${LTO_FLAGS}" \
+          -DCMAKE_INSTALL_PREFIX=/usr/local . && \
+    make -j${NAVIDROME_BUILD_CORES} install && ldconfig
 
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
@@ -83,7 +91,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
 COPY --from=jsbuilder /src/ui/build ./ui/build/
 
-# CGO_CFLAGS_ALLOW 복구 (LTO 플래그 통과를 위해 필수)
+# CGO_LDFLAGS에 LTO 플래그 명시적 추가
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     GOPROXY=https://proxy.golang.org,direct \
@@ -93,14 +101,14 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -I/usr/local/include/taglib" \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -I/usr/local/include/taglib" \
     CGO_CFLAGS_ALLOW="--define-prefix|-flto" \
-    CGO_LDFLAGS="-L/usr/local/lib -Wl,--gc-sections -Wl,--as-needed"
+    CGO_LDFLAGS="${LTO_FLAGS} -L/usr/local/lib -Wl,--gc-sections -Wl,--as-needed"
 
 RUN mkdir -p /out
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
-    GOOS=linux GOARCH=amd64 go build -p ${NAVIDROME_BUILD_CORES:-2} \
+    GOOS=linux GOARCH=amd64 go build -p ${NAVIDROME_BUILD_CORES} \
         -trimpath -buildvcs=false \
         -tags=" netgo sqlite_fts5 sqlite_foreign_keys embed" \
         -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
@@ -111,16 +119,15 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM debian:trixie-slim AS release
 LABEL maintainer="JBS Networks"
 
-# 타임존(tzdata) 패키지 복구
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg libavcodec-extra curl sqlite3 ca-certificates zlib1g libstdc++6 tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# FFmpeg 코어 강제 제한 래퍼 복구
+# FFmpeg 래퍼: 기본값을 환경 변수와 연동하여 자원 격리 보장
 RUN mv /usr/bin/ffmpeg /usr/bin/ffmpeg.real && \
     cat > /usr/bin/ffmpeg <<'EOF'
 #!/bin/sh
-exec /usr/bin/ffmpeg.real -threads 2 "$@"
+exec /usr/bin/ffmpeg.real -threads "${FFMPEG_THREADS:-2}" "$@"
 EOF
 RUN chmod +x /usr/bin/ffmpeg
 
@@ -139,7 +146,6 @@ RUN touch /.nddockerenv && chown 1000:1000 /.nddockerenv
 RUN cat > /entrypoint.sh <<'EOF'
 #!/bin/sh
 set -e
-# ND_DBPATH에서 순수 파일 경로만 유연하게 추출
 DB_FILE=$(echo "${ND_DBPATH}" | cut -d'?' -f1)
 if [ -n "${DB_FILE}" ] && [ -f "${DB_FILE}" ] && command -v sqlite3 >/dev/null 2>&1; then
   sqlite3 "${DB_FILE}" "PRAGMA wal_autocheckpoint=4000; PRAGMA wal_checkpoint(PASSIVE);" || true
@@ -155,12 +161,13 @@ ARG NAVIDROME_BUILD_CORES
 ARG GOMEMLIMIT
 ARG SCANSCHEDULE
 
-# TZ 복구 및 narenas:1, _timeout 복구
+# 메모리 반환 속도 향상 옵션 및 자원 제한 환경 변수 적용
 ENV TZ=Asia/Seoul \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF="narenas:1,tcache:false" \
+    MALLOC_CONF="narenas:1,tcache:false,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:2000" \
     GOMEMLIMIT=$GOMEMLIMIT \
-    GOMAXPROCS=${NAVIDROME_BUILD_CORES:-2} \
+    GOMAXPROCS=${NAVIDROME_BUILD_CORES} \
+    FFMPEG_THREADS=${NAVIDROME_BUILD_CORES} \
     ND_SCANSCHEDULE=$SCANSCHEDULE \
     ND_MUSICFOLDER=/music \
     ND_DATAFOLDER=/data \
