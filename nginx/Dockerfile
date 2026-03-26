@@ -1,5 +1,4 @@
 ARG NGINX_VERSION=1.29.7
-ARG OPENSSL_VERSION=3.5.4
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC"
 ARG LTO_FLAGS="-flto=auto"
 
@@ -7,22 +6,24 @@ FROM debian:trixie-slim AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 ARG NGINX_VERSION
-ARG OPENSSL_VERSION
 
+# AWS-LC 빌드에 필요한 golang과 ninja-build 추가
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl perl ca-certificates binutils \
-    libpcre2-dev pkg-config git && rm -rf /var/lib/apt/lists/*
+    libpcre2-dev pkg-config git golang ninja-build && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 
-# OpenSSL 3.5.4 빌드 (동적 링크용)
-RUN curl -fSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar -zxf - && \
-    mv "openssl-${OPENSSL_VERSION}" openssl && \
-    cd openssl && \
-    ./config --prefix=/opt/openssl --libdir=lib \
-        enable-tls1_3 enable-quic no-tests \
-        ${CPU_FLAGS} ${LTO_FLAGS} && \
-    make -j$(nproc) && make install
+# ✅ AWS-LC 소스 다운로드 및 정적 빌드 (BoringSSL 호환 구조)
+RUN git clone --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc && \
+    cd /tmp/aws-lc && \
+    cmake -B build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+        -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" && \
+    ninja -C build
 
 RUN wget -qO- https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2 | tar -xjf - && \
     cd jemalloc-5.3.0 && \
@@ -62,7 +63,7 @@ WORKDIR /tmp/nginx
 
 RUN sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config
 
-# 주의: --with-openssl 플래그 제거 (동적 링크를 위함), slice 모듈 추가
+# NGINX 빌드 (AWS-LC 정적 링크, TFO 및 고음질 스트리밍 최적화 유지)
 RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
@@ -83,10 +84,11 @@ RUN ./configure \
     --with-http_gzip_static_module \
     --with-http_gunzip_module \
     --with-http_slice_module \
+    --with-openssl=/tmp/aws-lc \
     --add-dynamic-module=/tmp/ngx_brotli \
     --add-dynamic-module=/tmp/ngx_http_zstd_module \
-    --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/openssl/include -I/usr/local/include" \
-    --with-ld-opt="${LTO_FLAGS} -L/opt/openssl/lib -L/usr/local/lib -Wl,-rpath,/opt/openssl/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed" && \
+    --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/usr/local/include" \
+    --with-ld-opt="${LTO_FLAGS} -L/usr/local/lib -Wl,-rpath,/usr/local/lib -Wl,--as-needed" && \
     make -j$(nproc) && make install && \
     strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so
 
@@ -105,24 +107,18 @@ RUN mkdir -p /etc/nginx/logs && \
     touch /etc/nginx/logs/error.log && \
     chmod -R 755 /etc/nginx/logs
 
-# OpenSSL 3.5 런타임 라이브러리
-COPY --from=builder /opt/openssl/lib/libssl.so* /opt/openssl/lib/
-COPY --from=builder /opt/openssl/lib/libcrypto.so* /opt/openssl/lib/
-
-# zlib-ng (와일드카드로 실제 파일과 심링크 모두 복사)
+# ✅ AWS-LC는 NGINX 바이너리에 내장되었으므로 libssl/libcrypto 복사가 필요 없음!
+# zlib-ng 및 jemalloc 런타임 라이브러리만 복사
 COPY --from=builder /usr/local/lib/libz.so* /usr/local/lib/
-
-# jemalloc
 COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
 
-RUN echo "/opt/openssl/lib" > /etc/ld.so.conf.d/openssl.conf && \
-    echo "/usr/local/lib"   > /etc/ld.so.conf.d/custom-libs.conf && \
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/custom-libs.conf && \
     ldconfig
 
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
 
 LABEL project="JBS Networks 4.3" \
-      optimization="Zen3/OpenSSL3.5-LTS/QUIC-0RTT/HTTP3/Zstd/Brotli/Jemalloc/Full-LTO/Slice"
+      optimization="Zen3/AWS-LC/QUIC/HTTP3/Zstd/Brotli/Jemalloc/Full-LTO/Slice"
 
 CMD ["nginx", "-g", "daemon off;"]
