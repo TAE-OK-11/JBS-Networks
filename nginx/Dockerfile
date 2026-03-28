@@ -113,8 +113,9 @@ RUN mkdir -p /etc/nginx/logs && \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf && \
     ldconfig
 
+# 요청하신 jemalloc LD_PRELOAD 및 MALLOC_CONF 설정 적용
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,tcache_max:4096,dirty_decay_ms:1000,muzzy_decay_ms:5000"
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:65536,dirty_decay_ms:30000,muzzy_decay_ms:30000,stats_print:false"
 
 EXPOSE 80 443/tcp 443/udp
 
