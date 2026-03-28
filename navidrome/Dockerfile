@@ -1,119 +1,3 @@
-# syntax=docker/dockerfile:1
-
-# [버전 설정] 최신 안정 버전 (All Debian 통일)
-ARG NAVIDROME_REF=v0.60.3
-ARG TAGLIB_VERSION=2.2.1
-ARG JEMALLOC_VERSION=5.3.0
-
-# [자원 격리] NGINX 및 시스템 코어 확보를 위한 2코어 엄격 제한
-ARG NAVIDROME_BUILD_CORES=2
-ARG GOMEMLIMIT=6GiB
-ARG SCANSCHEDULE=0
-
-# [최적화 설정] Zen 3 전용 및 LTO 플래그
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -DNDEBUG"
-ARG LTO_FLAGS="-flto=auto"
-ARG GOAMD64_VERSION=v3
-
-#####################################################
-### Stage 0: Fetch Navidrome Source (Debian 기반)
-FROM debian:trixie-slim AS source
-ARG NAVIDROME_REF
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-RUN git clone --branch "${NAVIDROME_REF}" --depth=1 \
-        https://github.com/navidrome/navidrome.git . && \
-    git rev-parse --short HEAD > /src/.git_sha
-
-#####################################################
-### Stage 1: Build jemalloc (Zen 3 + LTO 완벽 적용)
-FROM debian:trixie-slim AS jemalloc-builder
-ARG JEMALLOC_VERSION
-ARG NAVIDROME_BUILD_CORES
-ARG CPU_OPTIMIZATION_FLAGS
-ARG LTO_FLAGS
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential autoconf automake libtool bzip2 wget ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-RUN wget -qO jemalloc.tar.bz2 \
-        "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2" && \
-    tar -xjf jemalloc.tar.bz2
-WORKDIR /build/jemalloc-${JEMALLOC_VERSION}
-
-# LDFLAGS에 LTO 플래그 명시
-RUN CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    LDFLAGS="${LTO_FLAGS}" \
-    ./configure --prefix=/usr/local --disable-cxx && \
-    make -j${NAVIDROME_BUILD_CORES} install && \
-    strip --strip-unneeded /usr/local/lib/libjemalloc.so*
-
-#####################################################
-### Stage 2: Build UI (Debian 기반 Node 24 LTS)
-FROM node:24-bookworm-slim AS jsbuilder
-WORKDIR /src/ui
-COPY --from=source /src/ui ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --prefer-offline --no-audit --fund=false && npm run build
-
-#####################################################
-### Stage 3: Build TagLib + Navidrome (Go 1.26 + Zen 3)
-FROM golang:1.26-trixie AS gobuilder
-ARG TAGLIB_VERSION
-ARG NAVIDROME_REF
-ARG NAVIDROME_BUILD_CORES
-ARG CPU_OPTIMIZATION_FLAGS
-ARG LTO_FLAGS
-ARG GOAMD64_VERSION
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc g++ make cmake zlib1g-dev ca-certificates pkg-config wget libutfcpp-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /taglib-build
-RUN wget -qO taglib.tar.gz \
-        "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" && \
-    tar -xzf taglib.tar.gz && cd "taglib-${TAGLIB_VERSION}" && \
-    cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-          -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-          -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-          -DCMAKE_SHARED_LINKER_FLAGS="${LTO_FLAGS}" \
-          -DCMAKE_INSTALL_PREFIX=/usr/local . && \
-    make -j${NAVIDROME_BUILD_CORES} install && ldconfig
-
-WORKDIR /src
-COPY --from=source /src/go.mod /src/go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
-
-COPY --from=source /src ./
-COPY --from=jsbuilder /src/ui/build ./ui/build/
-
-# CGO_LDFLAGS에 LTO 플래그 명시적 추가
-ENV GOAMD64=${GOAMD64_VERSION} \
-    CGO_ENABLED=1 \
-    GOPROXY=https://proxy.golang.org,direct \
-    GOMODCACHE=/go/pkg/mod \
-    GOCACHE=/root/.cache/go-build \
-    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
-    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -I/usr/local/include/taglib" \
-    CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -I/usr/local/include/taglib" \
-    CGO_CFLAGS_ALLOW="--define-prefix|-flto" \
-    CGO_LDFLAGS="${LTO_FLAGS} -L/usr/local/lib -Wl,--gc-sections -Wl,--as-needed"
-
-RUN mkdir -p /out
-
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
-    GOOS=linux GOARCH=amd64 go build -p ${NAVIDROME_BUILD_CORES} \
-        -trimpath -buildvcs=false \
-        -tags=" netgo sqlite_fts5 sqlite_foreign_keys embed" \
-        -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
-        -o /out/navidrome
-
 #####################################################
 ### Stage 4: Runtime
 FROM debian:trixie-slim AS release
@@ -161,10 +45,10 @@ ARG NAVIDROME_BUILD_CORES
 ARG GOMEMLIMIT
 ARG SCANSCHEDULE
 
-# 메모리 반환 속도 향상 옵션 및 자원 제한 환경 변수 적용
+# [수정됨] jemalloc 신규 최적화 옵션 및 환경 변수 적용
 ENV TZ=Asia/Seoul \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF="narenas:1,tcache:false,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:2000" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false" \
     GOMEMLIMIT=$GOMEMLIMIT \
     GOMAXPROCS=${NAVIDROME_BUILD_CORES} \
     FFMPEG_THREADS=${NAVIDROME_BUILD_CORES} \
