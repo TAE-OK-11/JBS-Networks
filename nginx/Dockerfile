@@ -1,24 +1,27 @@
 ARG NGINX_VERSION=1.29.7
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC"
+ARG CPU_FLAGS="-O3 -march=native -mtune=native -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC"
 ARG LTO_FLAGS="-flto=auto -ffat-lto-objects"
 
+# Use debian:trixie-slim as base image as requested
 FROM debian:trixie-slim AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 ARG NGINX_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake wget curl perl ca-certificates binutils \
-    pkg-config git golang ninja-build rustc cargo \
+    build-essential cmake wget curl ca-certificates binutils \
+    pkg-config git golang ninja-build rustc cargo perl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 
+# 1. PCRE2
 RUN wget -qO- https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz | tar -zxf - && \
     cd pcre2-10.47 && \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" ./configure --prefix=/usr/local --enable-jit --enable-shared && \
     make -j$(nproc) && make install
 
+# 2. AWS-LC
 RUN git clone --branch v1.71.0 --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc && \
     cd /tmp/aws-lc && \
     cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
@@ -28,11 +31,19 @@ RUN git clone --branch v1.71.0 --depth=1 https://github.com/aws/aws-lc.git /tmp/
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON && \
     ninja -C build && ninja -C build install
 
-RUN wget -qO- https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2 | tar -xjf - && \
-    cd jemalloc-5.3.0 && \
-    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" ./configure --prefix=/usr/local --disable-cxx --enable-stats && \
+# 3. Mimalloc (v3.2.8 적용)
+RUN git clone --branch v3.2.8 --depth=1 https://github.com/microsoft/mimalloc.git /tmp/mimalloc && \
+    cd /tmp/mimalloc && \
+    mkdir -p out/Release && cd out/Release && \
+    cmake ../.. -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
+    -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
+    -DMI_BUILD_SHARED=ON -DMI_BUILD_STATIC=OFF \
+    -DMI_BUILD_TESTS=OFF \
+    -DCMAKE_INSTALL_PREFIX=/usr/local && \
     make -j$(nproc) && make install
 
+# 4. zlib-ng
 RUN git clone --branch 2.3.3 --depth=1 https://github.com/zlib-ng/zlib-ng.git && \
     cd zlib-ng && \
     cmake -B build -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
@@ -41,19 +52,25 @@ RUN git clone --branch 2.3.3 --depth=1 https://github.com/zlib-ng/zlib-ng.git &&
     cmake --build build --config Release -j$(nproc) && \
     cmake --install build
 
+# 5. zstd
 RUN wget -qO- https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz | tar -zxf - && \
     cd zstd-1.5.7 && \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" LDFLAGS="${LTO_FLAGS}" make -j$(nproc) && \
     make install PREFIX=/usr/local
 
-RUN git clone --depth=1 --recurse-submodules https://github.com/google/ngx_brotli.git && \
+# 6. brotli & ngx_http_zstd_module (Commit-pinned)
+RUN git clone https://github.com/google/ngx_brotli.git /tmp/ngx_brotli && \
+    cd /tmp/ngx_brotli && git checkout a71f931 && \
+    git submodule update --init --recursive && \
     cd /tmp/ngx_brotli/deps/brotli && \
     cmake -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
     -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j$(nproc) && make install && \
-    cd /tmp && git clone --depth=1 https://github.com/HanadaLee/ngx_http_zstd_module.git
+    cd /tmp && git clone https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module && \
+    cd /tmp/ngx_http_zstd_module && git checkout 09ce44e
 
+# 7. Nginx Build
 RUN curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" | tar -zxf - && \
     mv "nginx-${NGINX_VERSION}" nginx
 
@@ -82,6 +99,7 @@ RUN export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig && \
     make -j$(nproc) && make install && \
     strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so
 
+# 모듈 로드 설정
 RUN echo 'load_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;' > /etc/nginx/nginx.conf.new && \
     echo 'load_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;' >> /etc/nginx/nginx.conf.new && \
     echo 'load_module /usr/lib/nginx/modules/ngx_http_zstd_filter_module.so;' >> /etc/nginx/nginx.conf.new && \
@@ -89,11 +107,18 @@ RUN echo 'load_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;' 
     cat /etc/nginx/nginx.conf >> /etc/nginx/nginx.conf.new && \
     mv /etc/nginx/nginx.conf.new /etc/nginx/nginx.conf
 
+# 빌드 검증 단계 추가
+RUN /usr/sbin/nginx -V && \
+    /usr/sbin/nginx -t && \
+    ldd /usr/sbin/nginx && \
+    ldd /usr/lib/nginx/modules/*.so
+
+# ---------------- Final Image ----------------
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/sbin/nginx          /usr/sbin/nginx
 COPY --from=builder /usr/lib/nginx/modules   /usr/lib/nginx/modules
@@ -101,7 +126,7 @@ COPY --from=builder /etc/nginx               /etc/nginx
 
 COPY --from=builder /usr/local/lib/libpcre2-8.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libz.so* /usr/local/lib/
-COPY --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libmimalloc.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libzstd.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libbrotli*.so* /usr/local/lib/
 COPY --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
@@ -113,13 +138,18 @@ RUN mkdir -p /etc/nginx/logs && \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf && \
     ldconfig
 
-# 요청하신 jemalloc LD_PRELOAD 및 MALLOC_CONF 설정 적용
-ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:65536,dirty_decay_ms:30000,muzzy_decay_ms:30000,stats_print:false"
+# Create a non-privileged user and group for Nginx
+RUN groupadd -r nginx && useradd -r -g nginx -s /sbin/nologin -M nginx
+USER nginx
+
+# Mimalloc 환경변수 및 주입 설정
+ENV LD_PRELOAD="/usr/local/lib/libmimalloc.so.2" \
+    MIMALLOC_SHOW_STATS=0 \
+    MIMALLOC_PAGE_RESET=0
 
 EXPOSE 80 443/tcp 443/udp
 
 LABEL project="JBS Networks 4.3" \
-      optimization="Zen3/AWS-LC/Zstd/Brotli/zlib-ng/Jemalloc/PCRE2-JIT/Full-LTO/QUIC-HTTP3"
+      optimization="Zen3/AWS-LC/Zstd/Brotli/zlib-ng/Mimalloc-v3.2.8/PCRE2-JIT/Full-LTO/QUIC-HTTP3"
 
 CMD ["nginx", "-g", "daemon off;"]
