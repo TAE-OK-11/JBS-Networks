@@ -68,7 +68,7 @@ RUN curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" | tar -
 WORKDIR /tmp/nginx
 RUN sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config
 
-# 8. NGINX 컴파일 (추가하신 모듈 및 사용자 권한 명시 적용)
+# 8. NGINX 컴파일
 RUN export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig && \
     ./configure --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
@@ -97,22 +97,20 @@ RUN export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig && \
     strip -s /usr/sbin/nginx /usr/lib/nginx/modules/*.so && \
     ldd /usr/sbin/nginx | grep "not found" || true
 
-# ✅ 모듈 로드 파일 분리 및 기본 NGINX 설정에 헬스체크용 라우팅 임시 주입
+# ✅ 모듈 로드 파일 분리
 RUN printf '%s\n' \
       'load_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;' \
       'load_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;' \
       'load_module /usr/lib/nginx/modules/ngx_http_zstd_filter_module.so;' \
       'load_module /usr/lib/nginx/modules/ngx_http_zstd_static_module.so;' \
       > /etc/nginx/modules-load.conf && \
-    sed -i '1s|^|include /etc/nginx/modules-load.conf;\n|' /etc/nginx/nginx.conf && \
-    sed -i '/server {/a \    location /nginx-health {\n        access_log off;\n        return 200 "healthy\\n";\n    }' /etc/nginx/nginx.conf
+    sed -i '1s|^|include /etc/nginx/modules-load.conf;\n|' /etc/nginx/nginx.conf
 
 # --- 실행 환경(Runtime) 구성 ---
 FROM debian:trixie-slim
 
-# ✅ HEALTHCHECK용 curl 패키지 포함
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # ✅ nginx 사용자 생성 (nologin)
@@ -147,10 +145,6 @@ EXPOSE 80 443/tcp 443/udp
 
 # Graceful shutdown 지원
 STOPSIGNAL SIGQUIT
-
-# 헬스체크 추가
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1/nginx-health || exit 1
 
 LABEL project="JBS Networks 4.3" \
       optimization="Zen3/AWS-LC/Zstd/Brotli/zlib-ng/Jemalloc/PCRE2-JIT/Full-LTO/QUIC-HTTP3"
