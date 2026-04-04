@@ -140,10 +140,10 @@ RUN mkdir -p /etc/nginx/logs && \
 
 # Create a non-privileged user and group for Nginx
 RUN groupadd -r nginx && useradd -r -g nginx -s /sbin/nologin -M nginx
-USER nginx
+# USER nginx (삭제됨: 컨테이너가 루트 권한으로 시작되어야 SSL 인증서를 읽고 80/443 포트를 바인딩할 수 있음)
 
-# Mimalloc 환경변수 및 주입 설정
-ENV LD_PRELOAD="/usr/local/lib/libmimalloc.so.2" \
+# Mimalloc 환경변수 및 주입 설정 (.so.2 에서 .so 로 변경됨)
+ENV LD_PRELOAD="/usr/local/lib/libmimalloc.so" \
     MIMALLOC_SHOW_STATS=0 \
     MIMALLOC_PAGE_RESET=0
 
