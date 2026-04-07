@@ -1,4 +1,4 @@
-ARG NGINX_VERSION=1.29.7
+ARG NGINX_VERSION=1.29.8
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -DNDEBUG -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2"
 ARG LTO_FLAGS="-flto=auto"
 
