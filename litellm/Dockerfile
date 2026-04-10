@@ -68,15 +68,15 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONOPTIMIZE=2
 
-# 런타임 필수 라이브러리 (Jemalloc 패키지 및 OpenSSL 포함)
+# 런타임 필수 라이브러리 (Jemalloc 패키지, OpenSSL, NodeJS 필수 포함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     libsndfile1 \
     libatomic1 \
-    nodejs \
     ca-certificates \
     libjemalloc2 \
     openssl \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -95,5 +95,6 @@ RUN chmod +x -R /opt/prisma_binaries || true && \
 EXPOSE 4000/tcp
 
 # 핵심 트릭: 엔진 초기화 충돌을 막기 위해 Uvicorn 실행 직전에만 Jemalloc 주입
-ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && export MALLOC_CONF='background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000' && exec docker/prod_entrypoint.sh \"$@\"", "--"]
+# MALLOC_CONF에서 background_thread:true 제거 및 JSON 구문 오류 수정 완료
+ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && export MALLOC_CONF='metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000' && exec docker/prod_entrypoint.sh \"$@\"", "--"]
 CMD ["--port", "4000"]
