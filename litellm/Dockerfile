@@ -1,5 +1,5 @@
 # ==========================================
-# 1. Builder Stage
+# 1. Builder Stage (Now)
 # ==========================================
 # Zen3 전용 최적화 플래그 및 Thin LTO 적용 (GitHub Actions 메모리 한계 고려)
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe"
