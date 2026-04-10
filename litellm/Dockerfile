@@ -20,7 +20,6 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PATH="/opt/venv/bin:$PATH" \
     RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=thin"
 
-# 빌더 스테이지에도 ca-certificates 추가 (Prisma 엔진 다운로드 인증용)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl git pkg-config \
     python3 python3-pip python3-venv python3-dev \
@@ -37,9 +36,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
     pip install --no-cache-dir -r requirements.txt
 
-# 핵심 수정: npm root 권한 우회 및 캐시 생성
-RUN npm config set unsafe-perm true && \
-    npm install -g prisma --allow-root && \
+# 문제의 옵션 제거: ca-certificates가 있으므로 정상 설치됨
+RUN npm install -g prisma && \
     mkdir -p ${PRISMA_PY_BINARY_CACHE_DIR}
 
 COPY . .
