@@ -3,7 +3,6 @@ name: JBS-LiteLLM-Extreme-Build
 on:
   push:
     branches: [ "main" ]
-    # 1. litellm 폴더 내의 파일이 push될 때만 이 액션이 실행되도록 제한합니다.
     paths:
       - 'litellm/**'
 
@@ -11,8 +10,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      # 1. user의 인프라 레포지토리 복제 (커스텀 Dockerfile 가져오기)
+      - name: Checkout Custom Infra Repo
         uses: actions/checkout@v4
+        with:
+          path: custom-repo
+
+      # 2. LiteLLM 공식 레포지토리 복제 (최신 소스 및 requirements.txt 확보)
+      - name: Checkout LiteLLM Official Source
+        uses: actions/checkout@v4
+        with:
+          repository: BerriAI/litellm
+          path: litellm-src
+          # 특정 버전 고정이 필요하다면 아래 주석 해제 후 버전 명시
+          # ref: v1.34.0 
+
+      # 3. 공식 소스 디렉토리 내의 원본 Dockerfile을 커스텀 Dockerfile로 덮어쓰기
+      - name: Inject Custom Dockerfile
+        run: cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -23,8 +38,8 @@ jobs:
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
-          # 2. 빌드할 Dockerfile이 들어있는 폴더 경로를 지정합니다.
-          context: ./litellm/Dockerfile
+          # 4. 빌드 컨텍스트를 커스텀 Dockerfile이 덮어씌워진 공식 소스 폴더로 지정
+          context: ./litellm-src
+          file: ./litellm-src/Dockerfile
           push: true
-          # 컨테이너 이미지 태그는 최적화 버전에 맞추어 지정되었습니다.
           tags: ${{ secrets.DOCKER_USERNAME }}/jbs-litellm:extreme-4.3
