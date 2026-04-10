@@ -4,7 +4,6 @@
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe"
 ARG LTO_FLAGS="-flto=thin -fuse-ld=lld"
 
-# 엔진 호환성을 위해 안정 버전인 bookworm 사용
 FROM debian:bookworm AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
@@ -21,11 +20,12 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PATH="/opt/venv/bin:$PATH" \
     RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=thin"
 
+# 빌더 스테이지에도 ca-certificates 추가 (Prisma 엔진 다운로드 인증용)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl git pkg-config \
     python3 python3-pip python3-venv python3-dev \
     nodejs npm rustc cargo golang-go \
-    libssl-dev llvm clang lld libatomic1 \
+    libssl-dev llvm clang lld libatomic1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -37,7 +37,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
     pip install --no-cache-dir -r requirements.txt
 
-RUN npm install -g prisma && \
+# 핵심 수정: npm root 권한 우회 및 캐시 생성
+RUN npm config set unsafe-perm true && \
+    npm install -g prisma --allow-root && \
     mkdir -p ${PRISMA_PY_BINARY_CACHE_DIR}
 
 COPY . .
@@ -58,7 +60,6 @@ FROM debian:bookworm AS runtime
 ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
-    # 추가: 엔진 부팅 상세 로그 활성화
     PRISMA_PY_DEBUG=1 \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
