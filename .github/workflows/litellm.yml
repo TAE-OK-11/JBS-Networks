@@ -24,7 +24,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           # 2. 빌드할 Dockerfile이 들어있는 폴더 경로를 지정합니다.
-          context: ./litellm
+          context: ./litellm/Dockerfile
           push: true
           # 컨테이너 이미지 태그는 최적화 버전에 맞추어 지정되었습니다.
           tags: ${{ secrets.DOCKER_USERNAME }}/jbs-litellm:extreme-4.3
