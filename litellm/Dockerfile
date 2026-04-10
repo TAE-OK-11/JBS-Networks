@@ -20,7 +20,7 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PATH="/opt/venv/bin:$PATH" \
     RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=thin"
 
-# 빌드 필수 도구 설치 (libatomic1 포함)
+# 빌드 필수 도구 설치 (libatomic1, libssl-dev 포함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl git pkg-config \
     python3 python3-pip python3-venv python3-dev \
@@ -45,7 +45,7 @@ RUN npm install -g prisma && \
 
 COPY . .
 
-# 데이터베이스 ORM 생성 (엔진 다운로드 포함)
+# 데이터베이스 ORM 생성 (이때 엔진이 다운로드 됨)
 RUN prisma generate --schema=./litellm/proxy/schema.prisma
 
 # Admin UI 컴파일 및 최종 패키징
@@ -61,7 +61,7 @@ RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
 # 안정성 확보를 위해 Full Debian 이미지 사용
 FROM debian:trixie AS runtime
 
-# Prisma 엔진 경로 유지 및 Jemalloc (패키지 버전) 튜닝
+# Prisma 엔진 경로 유지 및 Jemalloc 튜닝
 ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
@@ -69,7 +69,7 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000" \
     PYTHONOPTIMIZE=2
 
-# 런타임 필수 라이브러리 (Jemalloc, libatomic1 명시)
+# 런타임 필수 라이브러리 (openssl 반드시 포함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     libsndfile1 \
@@ -77,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     ca-certificates \
     libjemalloc2 \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -86,8 +87,9 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/prisma_binaries /opt/prisma_binaries
 COPY --from=builder /app /app
 
-# 시스템 라이브러리 캐시 갱신 및 에러 방어 로직이 적용된 정리 작업
-RUN /sbin/ldconfig && \
+# 엔진 바이너리 실행 권한 보장 및 정리 작업
+RUN chmod +x -R /opt/prisma_binaries || true && \
+    /sbin/ldconfig && \
     find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true && \
     chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh
 
