@@ -44,12 +44,10 @@ RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip build wheel setuptools
 
 # 고성능 Rust/C 기반 라이브러리 강제 교체 및 소스 빌드
-# orjson: JSON 파싱
-# uvloop: 비동기 이벤트 루프
-# pydantic-core: 데이터 검증
-# watchfiles: 파일 감시
+# [Rust 기반] pydantic-core, orjson, tiktoken, cryptography, rpds-py, watchfiles
+# [C/Cython 기반] uvloop, httptools, MarkupSafe
 COPY requirements.txt .
-RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe -r requirements.txt || \
+RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
     pip install --no-cache-dir -r requirements.txt
 
 # Prisma 설치
@@ -78,7 +76,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # Jemalloc 런타임 튜닝 (Zen3 병렬 처리 극대화)
     LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000,stats_print:false" \
-    # Python 런타임 최적화 (docstring 및 assert 제거로 로드 속도 향상)
+    # Python 런타임 최적화
     PYTHONOPTIMIZE=2 \
     PYTHONNODEBUGRW=1
 
@@ -97,10 +95,8 @@ COPY --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app /app
 
-# 동적 라이브러리 캐시 갱신 및 테스트 파일 정리
-RUN ldconfig && \
-    find /opt/venv -type f -path "*/tornado/test/*" -delete && \
-    find /opt/venv -type d -path "*/tornado/test" -delete && \
+RUN /sbin/ldconfig && \
+    find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true && \
     chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh
 
 EXPOSE 4000/tcp
