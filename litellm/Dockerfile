@@ -8,9 +8,8 @@ FROM debian:trixie AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 
-# 엔진 격리 구동(binary) 및 경로 강제 고정
-ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
-    PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
+# 경로 강제 변경 변수 제거, 기본 경로 활용
+ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
     DEBIAN_FRONTEND=noninteractive \
     CC="clang" \
@@ -21,7 +20,6 @@ ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
     PATH="/opt/venv/bin:$PATH" \
     RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=thin"
 
-# 빌드 필수 도구 및 인증서 포함
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl git pkg-config \
     python3 python3-pip python3-venv python3-dev \
@@ -34,21 +32,17 @@ WORKDIR /app
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip build wheel setuptools
 
-# 고성능 Rust/C 모듈 컴파일
 COPY requirements.txt .
 RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
     pip install --no-cache-dir -r requirements.txt
 
-# Prisma 글로벌 설치 및 캐시 폴더 생성
-RUN npm install -g prisma && \
-    mkdir -p ${PRISMA_PY_BINARY_CACHE_DIR}
+RUN npm install -g prisma
 
 COPY . .
 
-# 스키마 기반 코드 생성 (엔진 바이너리 다운로드 포함)
+# 스키마 생성 시 /root/.cache/prisma-python 경로에 엔진이 다운로드 됨
 RUN prisma generate --schema=./litellm/proxy/schema.prisma
 
-# Admin UI 컴파일 및 패키징
 RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
     chmod +x docker/build_admin_ui.sh && \
     ./docker/build_admin_ui.sh && \
@@ -60,15 +54,12 @@ RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
 # ==========================================
 FROM debian:trixie AS runtime
 
-ENV PRISMA_PY_BINARY_CACHE_DIR=/opt/prisma_binaries \
-    PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
+ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
-    PRISMA_PY_DEBUG=1 \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONOPTIMIZE=2
 
-# 런타임 필수 라이브러리 (Jemalloc 패키지, OpenSSL, NodeJS 필수 포함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     libsndfile1 \
@@ -81,20 +72,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 빌드 결과물 및 격리된 Prisma 엔진 이관
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /opt/prisma_binaries /opt/prisma_binaries
+# 핵심 수정: Prisma 기본 캐시 디렉토리 전체 복사
+COPY --from=builder /root/.cache/prisma-python /root/.cache/prisma-python
 COPY --from=builder /app /app
 
-# 엔진 실행 권한 부여 및 시스템 정리
-RUN chmod +x -R /opt/prisma_binaries || true && \
+# 실행 권한 부여 및 시스템 캐시 갱신
+RUN chmod +x -R /root/.cache/prisma-python || true && \
     /sbin/ldconfig && \
     find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true && \
     chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh
 
 EXPOSE 4000/tcp
 
-# 핵심 트릭: 엔진 초기화 충돌을 막기 위해 Uvicorn 실행 직전에만 Jemalloc 주입
-# MALLOC_CONF에서 background_thread:true 제거 및 JSON 구문 오류 수정 완료
 ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && export MALLOC_CONF='metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000' && exec docker/prod_entrypoint.sh \"$@\"", "--"]
 CMD ["--port", "4000"]
