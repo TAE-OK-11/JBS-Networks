@@ -23,8 +23,7 @@ ARG NODE_DIGEST="sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f277344
 ARG GOLANG_DIGEST="sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34"
 ARG RUST_DIGEST="sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a"
 
-# ────────────────────────────────────────────────────────────────────────────
-
+# Source Stage
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS source
 ARG NAVIDROME_REF
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,6 +34,7 @@ RUN git clone --branch "${NAVIDROME_REF}" --depth=1 \
         https://github.com/navidrome/navidrome.git . && \
     git rev-parse --short HEAD > /src/.git_sha
 
+# Jemalloc Builder Stage
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS jemalloc-builder
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
@@ -59,6 +59,7 @@ RUN CC=clang CXX=clang++ \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l \
         -exec strip --strip-unneeded {} +
 
+# FFmpeg Builder Stage (with enhanced static linking)
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS ffmpeg-builder
 ARG FFMPEG_VERSION
 ARG FFMPEG_SHA256
@@ -90,8 +91,8 @@ RUN ./configure \
         --enable-protocol=file,pipe \
         --enable-demuxer=mp3,aac,flac,ogg,wav,aiff,mov,matroska,opus,ape,wv,dsf,caf \
         --enable-decoder=mp3,mp3float,aac,aac_fixed,flac,vorbis,opus,alac,\
-pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,wavpack,ape,\
-dsd_lsbf_planar,dsd_msbf_planar \
+        pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,wavpack,ape,\
+        dsd_lsbf_planar,dsd_msbf_planar \
         --enable-encoder=libmp3lame,libopus,libvorbis,flac,aac,pcm_s16le \
         --enable-muxer=mp3,flac,ogg,wav,opus,adts \
         --enable-filter=anull,aresample,volume,atrim,afade,aformat \
@@ -99,10 +100,12 @@ dsd_lsbf_planar,dsd_msbf_planar \
         --enable-libmp3lame \
         --enable-libopus \
         --enable-libvorbis \
-        --prefix=/usr/local && \
+        --prefix=/usr/local \
+        --enable-static --disable-shared && \ # <-- Enhanced static linking
     make -j${NAVIDROME_BUILD_CORES} install && \
     strip --strip-unneeded /usr/local/bin/ffmpeg
 
+# Rust Builder Stage (with FFmpeg wrapper)
 FROM rust:1.94.1-slim@${RUST_DIGEST} AS rust-builder
 ARG NAVIDROME_BUILD_CORES
 ARG RUST_TARGET_CPU
@@ -111,10 +114,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/* && \
     rustup target add x86_64-unknown-linux-musl
 WORKDIR /build
-RUN mkdir -p /out entrypoint/src healthcheck/src
-RUN cat > Cargo.toml <<'TOML'
+RUN mkdir -p /out entrypoint/src healthcheck/src ffmpeg-wrapper/src
+
+# Existing entrypoint and healthcheck Cargo.toml and main.rs
+RUN cat > Cargo.toml <<\"TOML\"
 [workspace]
-members = ["entrypoint", "healthcheck"]
+members = ["entrypoint", "healthcheck", "ffmpeg-wrapper"]
 resolver = "2"
 [profile.release]
 opt-level = 3
@@ -123,7 +128,8 @@ codegen-units = 1
 strip = true
 panic = "abort"
 TOML
-RUN cat > entrypoint/Cargo.toml <<'TOML'
+
+RUN cat > entrypoint/Cargo.toml <<\"TOML\"
 [package]
 name = "entrypoint"
 version = "0.1.0"
@@ -131,7 +137,7 @@ edition = "2021"
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 TOML
-RUN cat > entrypoint/src/main.rs <<'RUST_SRC'
+RUN cat > entrypoint/src/main.rs <<\"RUST_SRC\"
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -141,31 +147,32 @@ fn wal_checkpoint() {
         Ok(v) => v,
         Err(_) => return,
     };
-    let file = db_path.split('?').next().unwrap_or("").trim();
+    let file = db_path.split(\"?\").next().unwrap_or("\").trim();
     if file.is_empty() || !Path::new(file).exists() {
         return;
     }
     if let Ok(conn) = rusqlite::Connection::open(file) {
         let _ = conn.execute_batch(
-            "PRAGMA wal_autocheckpoint=4000; PRAGMA wal_checkpoint(PASSIVE);",
+            \"PRAGMA wal_autocheckpoint=4000; PRAGMA wal_checkpoint(PASSIVE);\",
         );
     }
 }
 fn main() {
     wal_checkpoint();
     let args: Vec<String> = env::args().skip(1).collect();
-    let err = Command::new("/app/navidrome").args(&args).exec();
-    eprintln!("[entrypoint] exec failed: {err}");
+    let err = Command::new(\"/app/navidrome\").args(&args).exec();
+    eprintln!(\"[entrypoint] exec failed: {err}\");
     std::process::exit(1);
 }
 RUST_SRC
-RUN cat > healthcheck/Cargo.toml <<'TOML'
+
+RUN cat > healthcheck/Cargo.toml <<\"TOML\"
 [package]
 name = "healthcheck"
 version = "0.1.0"
 edition = "2021"
 TOML
-RUN cat > healthcheck/src/main.rs <<'RUST_SRC'
+RUN cat > healthcheck/src/main.rs <<\"RUST_SRC\"
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -183,36 +190,70 @@ fn main() {
     };
     let _ = stream.set_read_timeout(Some(timeout));
     let req = format!(
-        "GET /ping HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        \"GET /ping HTTP/1.0\\r\\nHost: 127.0.0.1:{port}\\r\\nConnection: close\\r\\n\\r\\n\"
     );
     if stream.write_all(req.as_bytes()).is_err() {
         std::process::exit(1);
     }
     let mut buf = [0u8; 512];
     let n = stream.read(&mut buf).unwrap_or(0);
-    let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
-    if resp.starts_with("HTTP/1.") && resp.contains(" 200 ") {
+    let resp = std::str::from_utf8(&buf[..n]).unwrap_or("\");
+    if resp.starts_with(\"HTTP/1.\") && resp.contains(\" 200 \") {
         std::process::exit(0);
     }
     std::process::exit(1);
 }
 RUST_SRC
+
+# New FFmpeg Wrapper (Rust)
+RUN cat > ffmpeg-wrapper/Cargo.toml <<\"TOML\"
+[package]
+name = "ffmpeg-wrapper"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+# Add dependencies for process control, error handling, etc.
+# For example: tokio = { version = \"1\", features = [\"full\"] }, anyhow = \"1.0\"
+TOML
+RUN cat > ffmpeg-wrapper/src/main.rs <<\"RUST_FFMPEG_WRAPPER_SRC\"
+// Placeholder for Rust FFmpeg wrapper logic
+// This would parse arguments, set FFMPEG_THREADS dynamically, and execute ffmpeg.real
+use std::env;
+use std::process::{Command, exit};
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let ffmpeg_threads_str = env::var(\"FFMPEG_THREADS\").unwrap_or_else(|_| \"2\".to_string());
+    let threads = ffmpeg_threads_str.parse::<u32>().unwrap_or(2);
+
+    let mut cmd = Command::new(\"/usr/local/bin/ffmpeg.real\");
+    cmd.arg(\"-threads\").arg(threads.to_string());
+    cmd.args(&args);
+
+    let status = cmd.status().expect(\"Failed to execute ffmpeg.real\");
+    exit(status.code().unwrap_or(1));
+}
+RUST_FFMPEG_WRAPPER_SRC
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
     CC_x86_64_unknown_linux_musl=musl-gcc \
-    RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1" \
+    RUSTFLAGS=\"-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1\" \
     cargo build --release --target x86_64-unknown-linux-musl -j${NAVIDROME_BUILD_CORES} && \
     cp target/x86_64-unknown-linux-musl/release/entrypoint /out/entrypoint && \
-    cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck
+    cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck && \
+    cp target/x86_64-unknown-linux-musl/release/ffmpeg-wrapper /out/ffmpeg-wrapper
 
+# Node.js Builder Stage
 FROM node:24.14.1-bookworm-slim@${NODE_DIGEST} AS jsbuilder
 WORKDIR /src/ui
 COPY --from=source /src/ui ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit --fund=false && npm run build
 
+# Go Builder Stage (with Mold linker, PGO removed)
 FROM golang:1.26.2-bookworm@${GOLANG_DIGEST} AS gobuilder
 ARG TAGLIB_VERSION
 ARG TAGLIB_SHA256
@@ -223,22 +264,21 @@ ARG LTO_FLAGS
 ARG GOAMD64_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang lld llvm make cmake zlib1g-dev ca-certificates \
-        pkg-config wget libutfcpp-dev && \
+        pkg-config wget libutfcpp-dev mold && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /taglib-build
-# [수정] 정적 링크(-fPIC) 옵션 강제 추가
 RUN wget -qO taglib.tar.gz \
-        "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" && \
-    echo "${TAGLIB_SHA256}  taglib.tar.gz" | sha256sum -c - && \
-    tar -xzf taglib.tar.gz && cd "taglib-${TAGLIB_VERSION}" && \
+        \"https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz\" && \
+    echo \"${TAGLIB_SHA256}  taglib.tar.gz\" | sha256sum -c - && \
+    tar -xzf taglib.tar.gz && cd \"taglib-${TAGLIB_VERSION}\" && \
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_AR=llvm-ar \
           -DCMAKE_RANLIB=llvm-ranlib \
-          -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
-          -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
+          -DCMAKE_C_FLAGS=\"${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC\" \
+          -DCMAKE_CXX_FLAGS=\"${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC\" \
           -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j${NAVIDROME_BUILD_CORES} install
 WORKDIR /src
@@ -247,50 +287,41 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
 COPY --from=jsbuilder /src/ui/build ./ui/build/
 
-# [수정] CGO_LDFLAGS에 -lz (zlib) 및 -lm 명시, go build 명령어 한 줄 병합
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
-    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed"
+    CGO_CFLAGS=\"${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}\" \
+    CGO_LDFLAGS=\"${LTO_FLAGS} -fuse-ld=mold -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed\"
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
+    GIT_SHA=\"$(cat /src/.git_sha 2>/dev/null || echo dev)\" && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build -p ${NAVIDROME_BUILD_CORES} \
         -trimpath -buildvcs=false \
-        -tags="netgo sqlite_fts5 sqlite_foreign_keys embed" \
-        -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
+        -tags=\"netgo sqlite_fts5 sqlite_foreign_keys embed\" \
+        -ldflags=\"-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}\" \
         -o /out/navidrome .
 
+# Release Stage
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS release
-LABEL maintainer="JBS Networks"
-LABEL optimization="Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck"
-LABEL org.opencontainers.image.source="https://github.com/navidrome/navidrome"
+LABEL maintainer=\"JBS Networks\"
+LABEL optimization=\"Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck/Mold/StaticFFmpeg/RustFFmpegWrapper\"
+LABEL org.opencontainers.image.source=\"https://github.com/navidrome/navidrome\"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates zlib1g libstdc++6 tzdata \
         libmp3lame0 libopus0 libvorbis0a libvorbisenc2 libvorbisfile3 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real # Renamed to .real
 COPY --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
+RUN echo \"/usr/local/lib\" > /etc/ld.so.conf.d/local.conf && ldconfig
 
-# FFMPEG_THREADS를 정수로 강제 검증하여 셸 인젝션 차단
-RUN mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
-    cat > /usr/local/bin/ffmpeg <<'SH'
-#!/bin/sh
-THREADS=$(printf '%d' "${FFMPEG_THREADS:-2}" 2>/dev/null)
-if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
-    THREADS=2
-fi
-exec /usr/local/bin/ffmpeg.real -threads "$THREADS" "$@"
-SH
-RUN chmod 755 /usr/local/bin/ffmpeg
+# Use Rust FFmpeg wrapper
+COPY --chmod=755 --from=rust-builder /out/ffmpeg-wrapper /usr/local/bin/ffmpeg
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
@@ -303,7 +334,7 @@ COPY --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
 COPY --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
 
 USER 1000:1000
-VOLUME ["/data", "/music"]
+VOLUME [\"/data\", \"/music\"]
 
 ARG NAVIDROME_BUILD_CORES
 ARG GOMEMLIMIT
@@ -311,7 +342,7 @@ ARG SCANSCHEDULE
 
 ENV TZ=Asia/Seoul \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false" \
+    MALLOC_CONF=\"background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false\" \
     GOMEMLIMIT=${GOMEMLIMIT} \
     FFMPEG_THREADS=${NAVIDROME_BUILD_CORES} \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
@@ -319,7 +350,7 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CONFIGFILE=/data/navidrome.toml \
     ND_CACHEFOLDER=/data/cache \
-    ND_DBPATH="/data/navidrome.db?cache=shared&_journal_mode=WAL&_synchronous=NORMAL&_timeout=30000&_foreign_keys=on" \
+    ND_DBPATH=\"/data/navidrome.db?cache=shared&_journal_mode=WAL&_synchronous=NORMAL&_timeout=30000&_foreign_keys=on\" \
     ND_TRANSCODINGCACHESIZE=1000MiB \
     ND_IMAGECACHESIZE=100MiB \
     ND_COVERJPEGQUALITY=85 \
@@ -334,7 +365,7 @@ ENV TZ=Asia/Seoul \
 EXPOSE 4533
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["/usr/local/bin/healthcheck"]
+    CMD [\"/usr/local/bin/healthcheck\"]
 
 WORKDIR /app
-ENTRYPOINT ["/entrypoint"]
+ENTRYPOINT [\"/entrypoint\"]
