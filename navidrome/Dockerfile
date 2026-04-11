@@ -234,9 +234,10 @@ RUN wget -qO taglib.tar.gz \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_AR=llvm-ar \
+          -DCMAKE_RANLIB=llvm-ranlib \
           -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
           -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-          -DCMAKE_STATIC_LINKER_FLAGS="${LTO_FLAGS}" \
           -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j${NAVIDROME_BUILD_CORES} install
 WORKDIR /src
