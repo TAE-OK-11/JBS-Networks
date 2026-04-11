@@ -226,6 +226,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config wget libutfcpp-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /taglib-build
+# [수정] 정적 링크(-fPIC) 옵션 강제 추가
 RUN wget -qO taglib.tar.gz \
         "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" && \
     echo "${TAGLIB_SHA256}  taglib.tar.gz" | sha256sum -c - && \
@@ -236,8 +237,8 @@ RUN wget -qO taglib.tar.gz \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_AR=llvm-ar \
           -DCMAKE_RANLIB=llvm-ranlib \
-          -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-          -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+          -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
+          -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
           -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j${NAVIDROME_BUILD_CORES} install
 WORKDIR /src
@@ -245,23 +246,23 @@ COPY --from=source /src/go.mod /src/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
 COPY --from=jsbuilder /src/ui/build ./ui/build/
+
+# [수정] CGO_LDFLAGS에 -lz (zlib) 및 -lm 명시, go build 명령어 한 줄 병합
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -Wl,--gc-sections -Wl,--as-needed"
+    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed"
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build -p ${NAVIDROME_BUILD_CORES} \
         -trimpath -buildvcs=false \
-        -tags="sqlite_fts5 sqlite_foreign_keys embed" \
-        -ldflags="-s -w -buildid= \
-            -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} \
-            -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
+        -tags="netgo sqlite_fts5 sqlite_foreign_keys embed" \
+        -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
         -o /out/navidrome .
 
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS release
