@@ -45,6 +45,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NM=llvm-nm \
     LD=ld.lld
 
+# ✅ 수정됨: llvm 패키지 추가 (llvm-ar, llvm-ranlib 사용을 위함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     binutils \
@@ -56,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     golang \
     lld \
+    llvm \
     ninja-build \
     perl \
     pkg-config \
@@ -65,6 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
+# ✅ 수정됨: PCRE2 configure에 명시적 툴체인 파라미터 주입
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
@@ -73,7 +76,15 @@ RUN set -eux; \
     cd "pcre2-${PCRE2_VERSION}"; \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
     LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-    ./configure --prefix=/usr/local --enable-jit --enable-shared; \
+    ./configure \
+      --prefix=/usr/local \
+      --enable-jit \
+      --enable-shared \
+      CC="clang" \
+      CXX="clang++" \
+      AR="llvm-ar" \
+      RANLIB="llvm-ranlib" \
+      NM="llvm-nm"; \
     make -j"$(nproc)"; \
     make install
 
@@ -97,6 +108,7 @@ RUN set -eux; \
     ninja -C /tmp/aws-lc/build; \
     ninja -C /tmp/aws-lc/build install
 
+# ✅ 수정됨: Jemalloc configure에도 명시적 툴체인 파라미터 주입
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -105,7 +117,15 @@ RUN set -eux; \
     cd "jemalloc-${JEMALLOC_VERSION}"; \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
     LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-    ./configure --prefix=/usr/local --disable-cxx --enable-stats; \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-cxx \
+      --enable-stats \
+      CC="clang" \
+      CXX="clang++" \
+      AR="llvm-ar" \
+      RANLIB="llvm-ranlib" \
+      NM="llvm-nm"; \
     make -j"$(nproc)"; \
     make install
 
