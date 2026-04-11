@@ -45,7 +45,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NM=llvm-nm \
     LD=ld.lld
 
-# ✅ 수정됨: llvm 패키지 추가 (llvm-ar, llvm-ranlib 사용을 위함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     binutils \
@@ -67,7 +66,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# ✅ 수정됨: PCRE2 configure에 명시적 툴체인 파라미터 주입
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
@@ -108,7 +106,6 @@ RUN set -eux; \
     ninja -C /tmp/aws-lc/build; \
     ninja -C /tmp/aws-lc/build install
 
-# ✅ 수정됨: Jemalloc configure에도 명시적 툴체인 파라미터 주입
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -158,6 +155,7 @@ RUN set -eux; \
     make -j"$(nproc)"; \
     make install PREFIX=/usr/local
 
+# ✅ 수정됨: Brotli 빌드 시 --target brotlienc 제거
 RUN set -eux; \
     git clone --branch "${NGX_BROTLI_REF}" --depth=1 --recurse-submodules -j8 \
       https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
@@ -171,7 +169,7 @@ RUN set -eux; \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_INSTALL_PREFIX=/usr/local; \
-    cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel --target brotlienc; \
+    cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
     cmake --install /tmp/ngx_brotli/deps/brotli/out
 
 RUN git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
