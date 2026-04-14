@@ -1,91 +1,147 @@
-# ==========================================
-# 1. Builder Stage
-# ==========================================
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=debian:trixie
+FROM ${BASE_IMAGE} AS builder
+
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe"
-# ✅ 수정됨: thin LTO에서 full LTO로 변경
 ARG LTO_FLAGS="-flto=full -fuse-ld=lld"
+ARG RUSTFLAGS_NATIVE="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat -C codegen-units=1"
+ARG NPM_VERSION=11.12.1
+ARG PRISMA_ENGINE_VERSION=latest
 
-FROM debian:trixie AS builder
-ARG CPU_FLAGS
-ARG LTO_FLAGS
-
-# 경로 강제 변경 변수 제거, 기본 경로 활용
-# ✅ 수정됨: Rust 컴파일러의 LTO 옵션을 'thin'에서 'fat' (Full LTO)으로 변경
-ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
-    PRISMA_CLIENT_ENGINE_TYPE=binary \
-    DEBIAN_FRONTEND=noninteractive \
-    CC="clang" \
-    CXX="clang++" \
+ENV DEBIAN_FRONTEND=noninteractive \
+    CC=clang \
+    CXX=clang++ \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
     CXXFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+    CPPFLAGS="${CPU_FLAGS}" \
     LDFLAGS="${LTO_FLAGS} -Wl,--as-needed -Wl,-O1 -Wl,--sort-common" \
-    PATH="/opt/venv/bin:$PATH" \
-    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat"
+    RUSTFLAGS="${RUSTFLAGS_NATIVE}" \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    XDG_CACHE_HOME=/app/.cache \
+    PRISMA_BINARY_CACHE_DIR=/app/.cache/prisma-python/binaries \
+    PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
+    PRISMA_CLIENT_ENGINE_TYPE=binary \
+    PATH="/opt/venv/bin:/root/.cargo/bin:/root/.local/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake wget curl git pkg-config \
-    python3 python3-pip python3-venv python3-dev \
-    nodejs npm rustc cargo golang-go \
-    libssl-dev llvm clang lld libatomic1 ca-certificates \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    sed \
+    findutils \
+    coreutils \
+    build-essential \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-venv \
+    clang \
+    lld \
+    llvm \
+    rustc \
+    cargo \
+    nodejs \
+    npm \
+    openssl \
+    libssl-dev \
+    libsndfile1 \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN python3 -m venv /opt/venv && \
-    pip install --no-cache-dir --upgrade pip build wheel setuptools
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel build uv \
+    && npm install -g npm@${NPM_VERSION} prisma
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
-    pip install --no-cache-dir -r requirements.txt
+# dependency metadata first for cache efficiency
+COPY pyproject.toml uv.lock ./
+COPY enterprise/pyproject.toml enterprise/
+COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
+COPY package.json package-lock.json ./
 
-RUN npm install -g prisma
+# install third-party dependencies only
+RUN uv sync --frozen --no-install-project --no-install-workspace --no-default-groups --no-editable \
+    --extra proxy \
+    --extra proxy-runtime \
+    --extra extra_proxy \
+    --extra semantic-router \
+    --python /opt/venv/bin/python
 
+# now copy full source tree
 COPY . .
 
-# 스키마 생성 시 /root/.cache/prisma-python 경로에 엔진이 다운로드 됨
-RUN prisma generate --schema=./litellm/proxy/schema.prisma
+# normalize scripts
+RUN sed -i 's/\r$//' docker/build_admin_ui.sh \
+    && sed -i 's/\r$//' docker/entrypoint.sh \
+    && sed -i 's/\r$//' docker/prod_entrypoint.sh \
+    && chmod +x docker/build_admin_ui.sh docker/entrypoint.sh docker/prod_entrypoint.sh
 
-RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
-    chmod +x docker/build_admin_ui.sh && \
-    ./docker/build_admin_ui.sh && \
-    rm -rf dist/* && python3 -m build && \
-    pip install dist/*.whl
+# build admin ui
+RUN ./docker/build_admin_ui.sh
 
-# ==========================================
-# 2. Runtime Stage
-# ==========================================
-FROM debian:trixie AS runtime
+# install project + workspace packages
+RUN uv sync --frozen --no-default-groups --no-editable \
+    --extra proxy \
+    --extra proxy-runtime \
+    --extra extra_proxy \
+    --extra semantic-router \
+    --python /opt/venv/bin/python
 
-ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
+# generate prisma client using repo-root schema
+RUN test -f ./schema.prisma \
+    && prisma generate --schema=./schema.prisma
+
+# optional cleanup in builder to reduce copied size
+RUN find /opt/venv -type d -path "*/test*" -prune -exec rm -rf {} + || true \
+    && find /opt/venv -type d -path "*/tests*" -prune -exec rm -rf {} + || true \
+    && find /opt/venv -type d -path "*/__pycache__" -prune -exec rm -rf {} + || true \
+    && npm cache clean --force || true
+
+
+FROM ${BASE_IMAGE} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:${PATH}" \
+    XDG_CACHE_HOME=/app/.cache \
+    PRISMA_BINARY_CACHE_DIR=/app/.cache/prisma-python/binaries \
+    PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
-    DEBIAN_FRONTEND=noninteractive \
-    PATH="/opt/venv/bin:$PATH" \
-    PYTHONOPTIMIZE=2
+    PYTHONOPTIMIZE=2 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+    MALLOC_CONF=metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    libsndfile1 \
-    libatomic1 \
+    bash \
     ca-certificates \
-    libjemalloc2 \
+    python3 \
     openssl \
     nodejs \
+    npm \
+    libsndfile1 \
+    libatomic1 \
+    libjemalloc2 \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-# 핵심 수정: Prisma 기본 캐시 디렉토리 전체 복사
-COPY --from=builder /root/.cache/prisma-python /root/.cache/prisma-python
 COPY --from=builder /app /app
 
-# 실행 권한 부여 및 시스템 캐시 갱신
-RUN chmod +x -R /root/.cache/prisma-python || true && \
-    /sbin/ldconfig && \
-    find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true && \
-    chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh
+RUN chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh \
+    && chmod -R +x /app/.cache/prisma-python || true \
+    && find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true
 
-EXPOSE 4000/tcp
+EXPOSE 4000
 
-ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && export MALLOC_CONF='metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000' && exec docker/prod_entrypoint.sh \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "exec docker/prod_entrypoint.sh \"$@\"", "--"]
 CMD ["--port", "4000"]
