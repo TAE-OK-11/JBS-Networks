@@ -32,13 +32,24 @@ WORKDIR /app
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip build wheel setuptools
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
-    pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+RUN set -eux; \
+    req_file=""; \
+    for candidate in requirements.txt litellm/requirements.txt requirements/requirements.txt; do \
+      if [ -f "$candidate" ]; then req_file="$candidate"; break; fi; \
+    done; \
+    if [ -n "$req_file" ]; then \
+      pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r "$req_file" || \
+      pip install --no-cache-dir -r "$req_file"; \
+    elif [ -f pyproject.toml ]; then \
+      pip install --no-cache-dir .; \
+    else \
+      echo "ERROR: requirements.txt 또는 pyproject.toml 파일을 찾지 못했습니다." >&2; \
+      exit 1; \
+    fi
 
 RUN npm install -g prisma
-
-COPY . .
 
 # 스키마 생성 시 /root/.cache/prisma-python 경로에 엔진이 다운로드 됨
 RUN prisma generate --schema=./litellm/proxy/schema.prisma
