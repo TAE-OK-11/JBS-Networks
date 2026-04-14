@@ -41,10 +41,12 @@ COPY . .
 RUN if [ -f requirements.txt ]; then \
       pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
       pip install --no-cache-dir -r requirements.txt; \
+    elif [ -f requirements/proxy.txt ]; then \
+      pip install --no-cache-dir -r requirements/proxy.txt; \
     elif [ -f pyproject.toml ]; then \
       pip install --no-cache-dir .; \
     else \
-      echo "Neither requirements.txt nor pyproject.toml exists in build context" >&2; \
+      echo "No supported dependency manifest found (requirements.txt, requirements/proxy.txt, pyproject.toml)" >&2; \
       exit 1; \
     fi
 
