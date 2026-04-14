@@ -1,0 +1,20 @@
+.git
+.github
+.gitignore
+
+# Python caches / test artifacts
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/*.pyc
+**/*.pyo
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Local env files
+.env
+.env.*
+*.log

@@ -11,6 +11,7 @@ FROM debian:trixie@${DEBIAN_TRIXIE_DIGEST} AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 ARG PRISMA_VERSION
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # 경로 강제 변경 변수 제거, 기본 경로 활용
 # ✅ 수정됨: Rust 컴파일러의 LTO 옵션을 'thin'에서 'fat' (Full LTO)으로 변경
@@ -37,13 +38,20 @@ WORKDIR /app
 RUN python3 -m venv /opt/venv && \
     pip install --no-cache-dir --upgrade pip build wheel setuptools
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
-    pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN if [ -f requirements.txt ]; then \
+      pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
+      pip install --no-cache-dir -r requirements.txt; \
+    elif [ -f requirements/proxy.txt ]; then \
+      pip install --no-cache-dir -r requirements/proxy.txt; \
+    elif [ -f pyproject.toml ]; then \
+      pip install --no-cache-dir .; \
+    else \
+      echo "No supported dependency manifest found (requirements.txt, requirements/proxy.txt, pyproject.toml)" >&2; \
+      exit 1; \
+    fi
 
 RUN npm install -g "prisma@${PRISMA_VERSION}"
-
-COPY . .
 
 # 스키마 생성 시 /root/.cache/prisma-python 경로에 엔진이 다운로드 됨
 RUN prisma generate --schema=./litellm/proxy/schema.prisma
@@ -58,6 +66,7 @@ RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
 # 2. Runtime Stage
 # ==========================================
 FROM debian:trixie@${DEBIAN_TRIXIE_DIGEST} AS runtime
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
