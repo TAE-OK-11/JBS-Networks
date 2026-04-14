@@ -2,15 +2,13 @@
 # 1. Builder Stage
 # ==========================================
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe"
-# ✅ 수정됨: thin LTO에서 full LTO로 변경
-ARG LTO_FLAGS="-flto=full -fuse-ld=lld"
+ARG LTO_FLAGS="-flto=thin -fuse-ld=lld"
 
 FROM debian:trixie AS builder
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 
 # 경로 강제 변경 변수 제거, 기본 경로 활용
-# ✅ 수정됨: Rust 컴파일러의 LTO 옵션을 'thin'에서 'fat' (Full LTO)으로 변경
 ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
     DEBIAN_FRONTEND=noninteractive \
@@ -20,7 +18,7 @@ ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     CXXFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
     LDFLAGS="${LTO_FLAGS} -Wl,--as-needed -Wl,-O1 -Wl,--sort-common" \
     PATH="/opt/venv/bin:$PATH" \
-    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat"
+    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=thin"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake wget curl git pkg-config \
