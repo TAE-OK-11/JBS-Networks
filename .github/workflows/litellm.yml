@@ -2,32 +2,61 @@ name: JBS-LiteLLM-Extreme-Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
-      - 'litellm/**'
+      - "litellm/**"
+      - ".github/workflows/jbs-litellm-extreme-build.yml"
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      # 1. user의 인프라 레포지토리 복제 (커스텀 Dockerfile 가져오기)
       - name: Checkout Custom Infra Repo
         uses: actions/checkout@v4
         with:
           path: custom-repo
 
-      # 2. LiteLLM 공식 레포지토리 복제 (최신 소스 및 requirements.txt 확보)
       - name: Checkout LiteLLM Official Source
         uses: actions/checkout@v4
         with:
           repository: BerriAI/litellm
+          ref: v1.83.3-stable
           path: litellm-src
-          # 특정 버전 고정이 필요하다면 아래 주석 해제 후 버전 명시
-          # ref: v1.34.0 
 
-      # 3. 공식 소스 디렉토리 내의 원본 Dockerfile을 커스텀 Dockerfile로 덮어쓰기
+      - name: Verify LiteLLM Source Layout
+        run: |
+          set -eux
+          ls -la litellm-src
+          test -f litellm-src/pyproject.toml
+          test -f litellm-src/uv.lock
+          test -f litellm-src/schema.prisma
+          test -f litellm-src/package.json
+          test -f litellm-src/package-lock.json
+          test -d litellm-src/enterprise
+          test -d litellm-src/litellm-proxy-extras
+          test -d litellm-src/docker
+
       - name: Inject Custom Dockerfile
-        run: cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
+        run: |
+          cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
+
+      - name: Optional sanity diff
+        run: |
+          set -eux
+          test -f litellm-src/Dockerfile
+          head -n 40 litellm-src/Dockerfile
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -35,11 +64,31 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and Push
-        uses: docker/build-push-action@v5
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          # 4. 빌드 컨텍스트를 커스텀 Dockerfile이 덮어씌워진 공식 소스 폴더로 지정
+          images: ${{ secrets.DOCKER_USERNAME }}/jbs-litellm
+          tags: |
+            type=raw,value=extreme-4.3
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
           context: ./litellm-src
           file: ./litellm-src/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/jbs-litellm:extreme-4.3
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=debian:trixie
+            CPU_FLAGS=-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe
+            LTO_FLAGS=-flto=full -fuse-ld=lld
+            RUSTFLAGS_NATIVE=-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat -C codegen-units=1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
