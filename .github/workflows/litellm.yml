@@ -28,8 +28,13 @@ jobs:
       - name: Prepare LiteLLM Build Context
         run: |
           set -euxo pipefail
-          # upstream .dockerignore 변경으로 requirements/pyproject가 제외되는 이슈 방지
-          rm -f litellm-src/.dockerignore
+          # upstream .dockerignore 변경으로 manifest가 제외되는 이슈만 보완 (전체 삭제는 보안/크기 측면에서 비권장)
+          touch litellm-src/.dockerignore
+          cat <<'EOF' >> litellm-src/.dockerignore
+          !requirements.txt
+          !requirements/proxy.txt
+          !pyproject.toml
+          EOF
           ls -la litellm-src | head -n 80
           test -f litellm-src/requirements.txt || \
           test -f litellm-src/requirements/proxy.txt || \
