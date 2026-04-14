@@ -1,79 +1,51 @@
 # ==========================================
-# Build Arguments
-# ==========================================
-ARG DEBIAN_TRIXIE_DIGEST
-ARG PRISMA_VERSION
-
-# ==========================================
 # 1. Builder Stage
 # ==========================================
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS builder
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe"
+# ✅ 수정됨: thin LTO에서 full LTO로 변경
+ARG LTO_FLAGS="-flto=full -fuse-ld=lld"
 
-ARG PRISMA_VERSION
+FROM debian:trixie AS builder
+ARG CPU_FLAGS
+ARG LTO_FLAGS
 
-ENV DEBIAN_FRONTEND=noninteractive \
+# 경로 강제 변경 변수 제거, 기본 경로 활용
+# ✅ 수정됨: Rust 컴파일러의 LTO 옵션을 'thin'에서 'fat' (Full LTO)으로 변경
+ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
+    PRISMA_CLIENT_ENGINE_TYPE=binary \
+    DEBIAN_FRONTEND=noninteractive \
+    CC="clang" \
+    CXX="clang++" \
+    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+    CXXFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+    LDFLAGS="${LTO_FLAGS} -Wl,--as-needed -Wl,-O1 -Wl,--sort-common" \
     PATH="/opt/venv/bin:$PATH" \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat"
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-venv \
-    python3-pip \
-    python3-build \
-    nodejs \
-    npm \
-    git \
-    curl \
-    ca-certificates \
-    build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake wget curl git pkg-config \
+    python3 python3-pip python3-venv python3-dev \
+    nodejs npm rustc cargo golang-go \
+    libssl-dev llvm clang lld libatomic1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv /opt/venv
 
 WORKDIR /app
 
+RUN python3 -m venv /opt/venv && \
+    pip install --no-cache-dir --upgrade pip build wheel setuptools
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py -r requirements.txt || \
+    pip install --no-cache-dir -r requirements.txt
+
+RUN npm install -g prisma
+
 COPY . .
 
-# ── pip install (requirements.txt / pyproject.toml 자동 탐색) ──────────────
-RUN set -eux; \
-    req_file=""; \
-    for candidate in requirements.txt litellm/requirements.txt requirements/requirements.txt; do \
-      if [ -f "$candidate" ]; then req_file="$candidate"; break; fi; \
-    done; \
-    if [ -n "$req_file" ]; then \
-      pip install --no-binary=orjson,uvloop,pydantic-core,watchfiles,httptools,MarkupSafe,tiktoken,cryptography,rpds-py \
-        -r "$req_file" || \
-      pip install -r "$req_file"; \
-    elif [ -f pyproject.toml ]; then \
-      pip install . || pip install -e .; \
-    else \
-      echo "ERROR: requirements.txt 또는 pyproject.toml 파일을 찾지 못했습니다." >&2; \
-      exit 1; \
-    fi
+# 스키마 생성 시 /root/.cache/prisma-python 경로에 엔진이 다운로드 됨
+RUN prisma generate --schema=./litellm/proxy/schema.prisma
 
-# ── [FIX #1, #2] 중복 설치 제거 + npm cache clean 제거 ────────────────────
-# 버전 고정된 단일 RUN 만 유지, --mount=type=cache 와 cache clean 은 함께 쓰지 않음
-RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    npm install -g "prisma@${PRISMA_VERSION}" --prefer-offline --no-audit --fund=false
-
-# ── Prisma generate ───────────────────────────────────────────────────────
-RUN set -eux; \
-    schema_path=""; \
-    for candidate in litellm/proxy/schema.prisma prisma/schema.prisma schema.prisma; do \
-      if [ -f "$candidate" ]; then schema_path="$candidate"; break; fi; \
-    done; \
-    if [ -z "$schema_path" ]; then \
-      echo "ERROR: Prisma schema 파일을 찾지 못했습니다." >&2; \
-      exit 1; \
-    fi; \
-    prisma generate --schema="./${schema_path}"
-
-# ── Admin UI 빌드 + wheel 패키징 ──────────────────────────────────────────
-RUN test -f docker/build_admin_ui.sh && \
-    sed -i 's/\r$//' docker/build_admin_ui.sh && \
+RUN sed -i 's/\r$//' docker/build_admin_ui.sh && \
     chmod +x docker/build_admin_ui.sh && \
     ./docker/build_admin_ui.sh && \
     rm -rf dist/* && python3 -m build && \
@@ -82,21 +54,15 @@ RUN test -f docker/build_admin_ui.sh && \
 # ==========================================
 # 2. Runtime Stage
 # ==========================================
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS runtime
+FROM debian:trixie AS runtime
 
 ENV PRISMA_CLI_QUERY_ENGINE_TYPE=binary \
     PRISMA_CLIENT_ENGINE_TYPE=binary \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH" \
-    PYTHONOPTIMIZE=2 \
-    LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2" \
-    MALLOC_CONF="metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000" \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONOPTIMIZE=2
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     libsndfile1 \
     libatomic1 \
@@ -104,33 +70,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libjemalloc2 \
     openssl \
     nodejs \
-    tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ── [FIX #3] useradd 를 COPY 보다 먼저 실행 ──────────────────────────────
-RUN groupadd -r litellm && \
-    useradd -r -g litellm -d /home/litellm -m -s /usr/sbin/nologin litellm
-
-# ── builder 아티팩트 복사 ─────────────────────────────────────────────────
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /root/.cache/prisma-python /home/litellm/.cache/prisma-python
+# 핵심 수정: Prisma 기본 캐시 디렉토리 전체 복사
+COPY --from=builder /root/.cache/prisma-python /root/.cache/prisma-python
 COPY --from=builder /app /app
 
-# ── 권한 설정 ─────────────────────────────────────────────────────────────
-RUN test -f /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && \
-    chmod +x -R /home/litellm/.cache/prisma-python || true && \
-    chown -R litellm:litellm /home/litellm /app && \
-    ldconfig && \
+# 실행 권한 부여 및 시스템 캐시 갱신
+RUN chmod +x -R /root/.cache/prisma-python || true && \
+    /sbin/ldconfig && \
     find /opt/venv -type d -path "*/tornado/test" -exec rm -rf {} + || true && \
-    test -f docker/prod_entrypoint.sh && \
-    if [ -f docker/entrypoint.sh ]; then chmod +x docker/entrypoint.sh; fi && \
-    chmod +x docker/prod_entrypoint.sh
+    chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh
 
 EXPOSE 4000/tcp
 
-USER litellm
-
-ENTRYPOINT ["/usr/bin/tini", "--", "docker/prod_entrypoint.sh"]
+ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 && export MALLOC_CONF='metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000' && exec docker/prod_entrypoint.sh \"$@\"", "--"]
 CMD ["--port", "4000"]
