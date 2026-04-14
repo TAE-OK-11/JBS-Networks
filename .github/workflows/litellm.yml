@@ -25,9 +25,19 @@ jobs:
           # 특정 버전 고정이 필요하다면 아래 주석 해제 후 버전 명시
           # ref: v1.34.0 
 
+      - name: Prepare LiteLLM Build Context
+        run: |
+          set -euxo pipefail
+          ls -la litellm-src | head -n 80
+          test -f litellm-src/requirements.txt || \
+          test -f litellm-src/requirements/proxy.txt || \
+          test -f litellm-src/pyproject.toml
+
       # 3. 공식 소스 디렉토리 내의 원본 Dockerfile을 커스텀 Dockerfile로 덮어쓰기
-      - name: Inject Custom Dockerfile
-        run: cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
+      - name: Inject Custom Dockerfile & .dockerignore
+        run: |
+          cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
+          cp custom-repo/litellm/.dockerignore litellm-src/.dockerignore
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
