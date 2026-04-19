@@ -60,6 +60,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NM=llvm-nm \
     LD=ld.lld
 
+# 이 Dockerfile은 사실상 x86_64(znver3) 전용
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64|"") echo "Building for amd64/znver3";; \
+      *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/znver3 only." >&2; exit 1;; \
+    esac
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     bzip2 \
@@ -145,13 +151,8 @@ RUN set -eux; \
 RUN set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
-    case "${TARGETARCH}" in \
-      amd64)  CARGOC_ARCH="x86_64-unknown-linux-musl" ;; \
-      arm64)  CARGOC_ARCH="aarch64-unknown-linux-musl" ;; \
-      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
     curl -fsSL \
-      "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-${CARGOC_ARCH}.tar.gz" \
+      "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
       -o /tmp/cargo-c.tar.gz; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
@@ -180,14 +181,12 @@ RUN set -eux; \
     fi; \
     test -n "${REAL_SO}"; \
     test -f "/usr/local/lib/${REAL_SO}"; \
-    patchelf --set-soname libz.so.1 "/usr/local/lib/${REAL_SO}"; \
-    if [ ! -e /usr/local/lib/libz_rs.so ]; then \
-      ln -sf "${REAL_SO}" /usr/local/lib/libz_rs.so; \
-    fi; \
-    rm -f /usr/local/lib/libz.so /usr/local/lib/libz.so.1; \
-    ln -sf "${REAL_SO}" /usr/local/lib/libz.so.1; \
-    ln -sf "${REAL_SO}" /usr/local/lib/libz.so; \
-    strip --strip-debug "/usr/local/lib/${REAL_SO}" || true
+    install -Dm755 "/usr/local/lib/${REAL_SO}" /usr/local/lib/libz.so.1.0.0; \
+    patchelf --set-soname libz.so.1 /usr/local/lib/libz.so.1.0.0; \
+    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
+    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
+    ln -sf libz.so.1.0.0 /usr/local/lib/libz_rs.so; \
+    strip --strip-debug /usr/local/lib/libz.so.1.0.0 || true
 
 # ---------------------------------------------------------
 # 5) zstd
@@ -214,7 +213,7 @@ RUN set -eux; \
 
 RUN set -eux; \
     cd /tmp/ngx_brotli; \
-    git submodule update --init --recursive --filter=blob:none -j8
+    git submodule update --init --recursive --filter=blob:none
 
 RUN set -eux; \
     cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
@@ -228,7 +227,8 @@ RUN set -eux; \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
-    cmake --install /tmp/ngx_brotli/deps/brotli/out
+    cmake --install /tmp/ngx_brotli/deps/brotli/out; \
+    strip -s /usr/local/lib/libbrotli*.so* || true
 
 RUN set -eux; \
     git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
@@ -314,7 +314,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r nginx && useradd -r -g nginx -s /usr/sbin/nologin nginx
@@ -326,7 +325,7 @@ COPY --from=builder /usr/local/lib/libpcre2-8.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libzstd.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libbrotli*.so* /usr/local/lib/
-COPY --from=builder /usr/local/lib/libz_rs.so /usr/local/lib/
+COPY --from=builder /usr/local/lib/libz.so.1.0.0 /usr/local/lib/
 COPY --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
 COPY --from=builder /opt/awslc/lib/libcrypto.so* /opt/awslc/lib/
 
@@ -344,9 +343,9 @@ RUN set -eux; \
     ln -sf /var/log/nginx /etc/nginx/logs; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
+    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
+    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf; \
-    ln -sf libz_rs.so /usr/local/lib/libz.so.1; \
-    ln -sf libz_rs.so /usr/local/lib/libz.so; \
     ldconfig; \
     ldd /usr/sbin/nginx | tee /tmp/ldd.txt; \
     ! grep -q "not found" /tmp/ldd.txt; \
@@ -359,7 +358,7 @@ ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
 EXPOSE 80 443/tcp 443/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fs http://127.0.0.1/ || exit 1
+  CMD nginx -t -q || exit 1
 
 STOPSIGNAL SIGQUIT
 
