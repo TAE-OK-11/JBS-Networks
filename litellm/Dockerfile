@@ -5,8 +5,8 @@
 # Upstream reference: BerriAI/litellm@litellm_internal_staging (v1.83.9)
 #
 
-ARG LITELLM_BUILD_IMAGE=python:3.11-slim-bookworm
-ARG LITELLM_RUNTIME_IMAGE=python:3.11-slim-bookworm
+ARG LITELLM_BUILD_IMAGE=python:3.13-slim-bookworm
+ARG LITELLM_RUNTIME_IMAGE=python:3.13-slim-bookworm
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10.9@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82
 
 FROM ${UV_IMAGE} AS uvbin
