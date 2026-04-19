@@ -179,8 +179,16 @@ RUN set -eux; \
     rm -rf /tmp/cargo-c.tar.gz /tmp/cargo-c-tmp; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
     export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"; \
-    # build and install the shared and static libraries
-    cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
+    # build and install the shared and static libraries.  We explicitly disable
+    # default features and enable the "c-allocator" and "gz" features.
+    # The gz feature exports the gz* API (gzopen, gzclose, gzread, etc.)
+    # which is required by tools such as wget.  Without this feature the
+    # resulting libz.so will be missing symbols like gzclose, causing
+    # symbol lookup errors during later stages of the build.  Using
+    # c-allocator ensures the library uses C malloc/free (which map to
+    # jemalloc under LD_PRELOAD) for zalloc/zfree callbacks.
+    cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib \
+        --no-default-features --features="c-allocator,gz"; \
     # copy headers into the standard include location for C projects
     if [ -d /usr/local/include/libz_rs ]; then \
       [ -e /usr/local/include/zlib.h ]  || cp /usr/local/include/libz_rs/zlib.h  /usr/local/include/zlib.h; \
