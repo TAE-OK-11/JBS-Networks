@@ -106,6 +106,8 @@ RUN set -eux; \
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
+    # CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON 은 CMake가 -flto=thin 을 자동 추가해
+    # CMAKE_C_FLAGS 의 -flto=full 과 충돌함. LTO 는 FLAGS에서 명시 제어하므로 IPO 제거.
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
@@ -116,8 +118,7 @@ RUN set -eux; \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON; \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true
 
@@ -213,17 +214,30 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 6) Brotli + nginx zstd module
+# NOTE: NGX_BROTLI_REF 는 브랜치/태그가 아닌 커밋 SHA 이므로
+#       --depth=1 shallow clone 후 `git fetch <sha>` 는 GitHub 서버가
+#       임의 SHA 직접 fetch 를 거부해 exit 128 로 실패함.
+#       → --filter=blob:none (blobless partial clone) 사용:
+#         커밋/트리 메타데이터는 전부 받고, 블롭은 checkout 시점에만 받아옴.
+#         임의 SHA checkout 이 가능하면서 full clone 보다 빠름.
 # ---------------------------------------------------------
 RUN set -eux; \
-    git clone --depth=1 --recurse-submodules -j8 \
+    git clone --filter=blob:none \
       https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
     cd /tmp/ngx_brotli; \
-    git fetch --depth=1 origin "${NGX_BROTLI_REF}"; \
     git checkout "${NGX_BROTLI_REF}"; \
+    git submodule update --init --recursive --filter=blob:none -j8; \
+    # CMAKE_C_COMPILER=clang: 명시하지 않으면 CC env 가 무시되고 gcc 가 선택될 수 있음.
+    # CMAKE_INSTALL_LIBDIR=lib: Debian 에서 GNUInstallDirs 가 기본값으로
+    #   lib/x86_64-linux-gnu/ 를 사용하므로, 명시하지 않으면 libbrotli*.so 가
+    #   /usr/local/lib/x86_64-linux-gnu/ 에 설치되어 뒤따르는 COPY 및
+    #   nginx -L/usr/local/lib 에서 라이브러리를 찾지 못함.
     cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DCMAKE_C_COMPILER=clang \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
