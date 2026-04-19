@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-ARG NGINX_VERSION=1.29.8
-ARG NGINX_SHA256=7f1b985dace8fe706dfc288b83927c928f0ae60bcb7507c2d4e0025eca7280c3
+# =========================================================
+# JBS Networks NGINX 4.8 - stabilized final
+# 2026-04-19
+# =========================================================
+
+ARG NGINX_VERSION=1.30.0
+ARG NGINX_SHA256=058188c64bf22baecaa72b809a6318a4f9ba623889c554feab03f7cb853ab31b
 
 ARG PCRE2_VERSION=10.47
 ARG PCRE2_SHA256=c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16
@@ -15,11 +20,19 @@ ARG ZLIBRS_VERSION=v0.6.3
 ARG CARGOC_VERSION=v0.10.7
 
 ARG ZSTD_VERSION=1.5.7
+ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+
+ARG NGX_ZSTD_MODULE_VERSION=0.1.1
+ARG NGX_BROTLI_REF=a71f931603a7e3905087349927d693ca6972046d
 
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
 
+# =========================================================
+# Builder
+# =========================================================
 FROM debian:trixie-slim AS builder
+
 ARG NGINX_VERSION
 ARG NGINX_SHA256
 ARG PCRE2_VERSION
@@ -30,10 +43,21 @@ ARG JEMALLOC_SHA256
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
 ARG ZSTD_VERSION
+ARG ZSTD_SHA256
+ARG NGX_ZSTD_MODULE_VERSION
+ARG NGX_BROTLI_REF
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CC=clang \
+    CXX=clang++ \
+    AR=llvm-ar \
+    RANLIB=llvm-ranlib \
+    NM=llvm-nm \
+    LD=ld.lld
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -58,7 +82,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# PCRE2
+# ---------------------------------------------------------
+# 1) PCRE2
+# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
@@ -75,7 +101,9 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libpcre2-8.so* || true
 
-# AWS-LC
+# ---------------------------------------------------------
+# 2) AWS-LC
+# ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
@@ -93,7 +121,9 @@ RUN set -eux; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true
 
-# jemalloc
+# ---------------------------------------------------------
+# 3) jemalloc
+# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -109,10 +139,18 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true
 
-# zlib-rs  ✅ self-copy 버그 수정판
+# ---------------------------------------------------------
+# 4) zlib-rs
+# NOTE: cargo cinstall --libdir=/usr/local/lib 지정 시
+#       libz_rs.pc가 /usr/local/lib/pkgconfig/에 직접 설치됨.
+#       이미 존재하는 파일을 같은 경로에 cp하면 set -e 환경에서
+#       "same file" 오류로 빌드가 실패하므로 해당 cp 블록을 제거함.
+# ---------------------------------------------------------
 RUN set -eux; \
-    git clone --branch "${ZLIBRS_VERSION}" --depth=1 https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
-    curl -fsSL "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
+    git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
+      https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
+    curl -fsSL \
+      "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
       -o /tmp/cargo-c.tar.gz; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
@@ -126,60 +164,67 @@ RUN set -eux; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
     export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C llvm-args=-enable-dfa-jump-thread"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
+    # 일부 버전에서 헤더가 서브디렉터리에 설치될 경우 대비한 방어 코드
     if [ -d /usr/local/include/libz_rs ]; then \
       cp /usr/local/include/libz_rs/zlib.h /usr/local/include/zlib.h; \
       cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h || true; \
     fi; \
-    test -f /usr/local/lib/pkgconfig/libz_rs.pc; \
-    test -f /usr/local/lib/libz_rs.so; \
+    # libz_rs.so 실제 설치 경로 탐지 후 /usr/local/lib/에 정규화
+    LIBZ_RS="$(find /usr/local -type f -name 'libz_rs.so' | head -n1)"; \
+    test -n "${LIBZ_RS}"; \
+    install -Dm755 "${LIBZ_RS}" /usr/local/lib/libz_rs.so; \
+    # SONAME을 libz.so.1로 교정 → nginx ELF NEEDED 항목과 일치
     patchelf --set-soname libz.so.1 /usr/local/lib/libz_rs.so; \
     ln -sf libz_rs.so /usr/local/lib/libz.so.1; \
     ln -sf libz_rs.so /usr/local/lib/libz.so; \
     strip --strip-debug /usr/local/lib/libz_rs.so || true
 
-# zstd
+# ---------------------------------------------------------
+# 5) zstd
+# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "zstd-${ZSTD_VERSION}.tar.gz" \
       "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
+    echo "${ZSTD_SHA256}  zstd-${ZSTD_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "zstd-${ZSTD_VERSION}.tar.gz"; \
-    cd "zstd-${ZSTD_VERSION}/build/cmake"; \
-    cmake -S . -B build -GNinja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DZSTD_BUILD_PROGRAMS=OFF \
-      -DZSTD_BUILD_SHARED=ON \
-      -DZSTD_BUILD_STATIC=ON \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
-      -DCMAKE_C_COMPILER=clang \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
-    ninja -C build install; \
+    cd "zstd-${ZSTD_VERSION}"; \
+    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+    LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
+    make -j"$(nproc)" install PREFIX=/usr/local; \
     strip -s /usr/local/lib/libzstd.so* || true
 
-# ngx_brotli + zstd module
+# ---------------------------------------------------------
+# 6) Brotli + nginx zstd module
+# ---------------------------------------------------------
 RUN set -eux; \
-    git clone --recurse-submodules --depth=1 https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
-    cd /tmp/ngx_brotli/deps/brotli; \
-    mkdir -p out; \
-    cd out; \
-    cmake -G Ninja \
+    git clone --depth=1 --recurse-submodules -j8 \
+      https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
+    cd /tmp/ngx_brotli; \
+    git fetch --depth=1 origin "${NGX_BROTLI_REF}"; \
+    git checkout "${NGX_BROTLI_REF}"; \
+    cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=OFF \
-      -DCMAKE_C_COMPILER=clang \
-      -DCMAKE_CXX_COMPILER=clang++ \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      ..; \
-    ninja; \
-    git clone --depth=1 https://github.com/tokers/zstd-nginx-module.git /tmp/zstd-nginx-module
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
+    cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
+    cmake --install /tmp/ngx_brotli/deps/brotli/out; \
+    git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
+      https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module
 
-# nginx
+# ---------------------------------------------------------
+# 7) NGINX
+# ---------------------------------------------------------
 RUN set -eux; \
-    wget -qO "nginx-${NGINX_VERSION}.tar.gz" "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
+    curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
+      -o "nginx-${NGINX_VERSION}.tar.gz"; \
     echo "${NGINX_SHA256}  nginx-${NGINX_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; \
-    cd "nginx-${NGINX_VERSION}"; \
-    export PKG_CONFIG_PATH="/opt/awslc/lib/pkgconfig:/usr/local/lib/pkgconfig"; \
-    export LD_LIBRARY_PATH="/opt/awslc/lib:/usr/local/lib"; \
+    mv "nginx-${NGINX_VERSION}" /tmp/nginx; \
+    cd /tmp/nginx; \
+    sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config; \
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"; \
     ./configure \
       --prefix=/etc/nginx \
       --sbin-path=/usr/sbin/nginx \
@@ -189,35 +234,62 @@ RUN set -eux; \
       --http-log-path=/var/log/nginx/access.log \
       --pid-path=/var/run/nginx.pid \
       --lock-path=/var/run/nginx.lock \
+      --http-client-body-temp-path=/var/cache/nginx/client_temp \
+      --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+      --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+      --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+      --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
-      --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
-      --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections -L/opt/awslc/lib -L/usr/local/lib -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -ljemalloc" \
       --with-pcre-jit \
       --with-threads \
       --with-file-aio \
-      --with-compat \
       --with-http_ssl_module \
       --with-http_v2_module \
       --with-http_v3_module \
       --with-http_realip_module \
       --with-http_stub_status_module \
-      --with-http_sub_module \
-      --with-http_slice_module \
       --with-http_gzip_static_module \
+      --with-http_gunzip_module \
+      --with-http_slice_module \
+      --with-http_auth_request_module \
+      --with-http_sub_module \
+      --with-http_secure_link_module \
       --with-stream \
       --with-stream_ssl_module \
       --with-stream_realip_module \
       --with-stream_ssl_preread_module \
       --add-module=/tmp/ngx_brotli \
-      --add-module=/tmp/zstd-nginx-module; \
+      --add-module=/tmp/ngx_http_zstd_module \
+      --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
+      --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -L/opt/awslc/lib -L/usr/local/lib -lssl -lcrypto -lpcre2-8 -lz -lzstd -lbrotlienc -lbrotlicommon"; \
     make -j"$(nproc)"; \
     make install; \
-    strip -s /usr/sbin/nginx || true
+    strip -s /usr/sbin/nginx; \
+    if compgen -G "/usr/lib/nginx/modules/*.so" > /dev/null; then \
+      strip -s /usr/lib/nginx/modules/*.so; \
+    fi; \
+    nginx -V 2>&1 | grep -q -- '--with-http_v3_module'; \
+    ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
+    ! grep -q "not found" /tmp/builder_ldd.txt
 
+# =========================================================
+# Runtime
+# =========================================================
 FROM debian:trixie-slim AS runtime
+
+ARG NGINX_VERSION
+ARG AWSLC_VERSION
+ARG ZLIBRS_VERSION
+ARG CARGOC_VERSION
+ARG ZSTD_VERSION
+ARG NGX_BROTLI_REF
+ARG JEMALLOC_VERSION
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -226,41 +298,64 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN groupadd -r nginx && useradd -r -g nginx -s /usr/sbin/nologin nginx
 
-RUN install -d -o nginx -g nginx \
-    /var/cache/nginx \
-    /var/log/nginx \
-    /var/lib/nginx/body \
-    /var/lib/nginx/proxy \
-    /var/lib/nginx/fastcgi \
-    /var/lib/nginx/uwsgi \
-    /var/lib/nginx/scgi \
-    /etc/nginx/conf.d \
-    /usr/lib/nginx/modules
-
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /etc/nginx /etc/nginx
 
-COPY --from=builder /opt/awslc/lib/libssl.so /opt/awslc/lib/libssl.so
-COPY --from=builder /opt/awslc/lib/libcrypto.so /opt/awslc/lib/libcrypto.so
+COPY --from=builder /usr/local/lib/libpcre2-8.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libzstd.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libbrotli*.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libz_rs.so /usr/local/lib/
+COPY --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
+COPY --from=builder /opt/awslc/lib/libcrypto.so* /opt/awslc/lib/
 
-COPY --from=builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
-COPY --from=builder /usr/local/lib/libpcre2-8.so.0.15.0 /usr/local/lib/libpcre2-8.so.0.15.0
-COPY --from=builder /usr/local/lib/libz_rs.so /usr/local/lib/libz_rs.so
-COPY --from=builder /usr/local/lib/libzstd.so /usr/local/lib/libzstd.so
-COPY --from=builder /usr/local/lib/libzstd.so.1 /usr/local/lib/libzstd.so.1
-COPY --from=builder /usr/local/lib/libzstd.so.1.5.7 /usr/local/lib/libzstd.so.1.5.7
+RUN set -eux; \
+    mkdir -p \
+      /var/log/nginx \
+      /var/cache/nginx/client_temp \
+      /var/cache/nginx/proxy_temp \
+      /var/cache/nginx/fastcgi_temp \
+      /var/cache/nginx/uwsgi_temp \
+      /var/cache/nginx/scgi_temp \
+      /run; \
+    chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx; \
+    # /etc/nginx/logs → /var/log/nginx 심볼릭 링크
+    # rm -rf 선행으로 "디렉터리 내부에 링크 생성" 문제 방지
+    rm -rf /etc/nginx/logs; \
+    ln -sf /var/log/nginx /etc/nginx/logs; \
+    ln -sf /dev/stdout /var/log/nginx/access.log; \
+    ln -sf /dev/stderr /var/log/nginx/error.log; \
+    printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf; \
+    # COPY는 심볼릭 링크를 follow하므로 libz_rs.so 실체만 복사됨.
+    # libz 호환 심볼릭 링크를 runtime에서 재생성
+    ln -sf libz_rs.so /usr/local/lib/libz.so.1; \
+    ln -sf libz_rs.so /usr/local/lib/libz.so; \
+    ldconfig; \
+    ldd /usr/sbin/nginx | tee /tmp/ldd.txt; \
+    ! grep -q "not found" /tmp/ldd.txt; \
+    nginx -V; \
+    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 nginx -t
 
-RUN ln -sf /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so \
-    && ln -sf /usr/local/lib/libpcre2-8.so.0.15.0 /usr/local/lib/libpcre2-8.so.0 \
-    && ln -sf /usr/local/lib/libpcre2-8.so.0.15.0 /usr/local/lib/libpcre2-8.so \
-    && ln -sf /usr/local/lib/libz_rs.so /usr/local/lib/libz.so.1 \
-    && ln -sf /usr/local/lib/libz_rs.so /usr/local/lib/libz.so \
-    && printf '%s\n%s\n' '/opt/awslc/lib' '/usr/local/lib' > /etc/ld.so.conf.d/jbs-nginx.conf \
-    && ldconfig
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:phycpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000"
 
-ENV LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
+EXPOSE 80 443/tcp 443/udp
 
-EXPOSE 80/tcp 443/tcp 443/udp
+# HTTP healthcheck: nginx가 127.0.0.1:80에서 HTTP를 서비스한다고 가정.
+# stream-only/TCP-only 배포 시 적합한 probe로 교체 필요.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fs http://127.0.0.1/ || exit 1
+
 STOPSIGNAL SIGQUIT
+
+LABEL project="JBS Networks 4.8 Rust-Optimized" \
+      nginx.version="${NGINX_VERSION}" \
+      awslc.version="${AWSLC_VERSION}" \
+      zlib-rs.version="${ZLIBRS_VERSION}" \
+      cargo-c.version="${CARGOC_VERSION}" \
+      zstd.version="${ZSTD_VERSION}" \
+      jemalloc.version="${JEMALLOC_VERSION}" \
+      ngx_brotli.ref="${NGX_BROTLI_REF}" \
+      optimization="Extreme/Znver3/Full-LTO/Clang/LLD/AWS-LC/Jemalloc/zlib-rs/Brotli/Zstd"
 
 CMD ["nginx", "-g", "daemon off;"]
