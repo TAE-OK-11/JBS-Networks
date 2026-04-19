@@ -7,17 +7,17 @@ ARG FFMPEG_VERSION=8.1
 ARG NAVIDROME_BUILD_CORES=2
 ARG GOMEMLIMIT=6GiB
 ARG SCANSCHEDULE=0
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -ftree-vectorize"
 ARG LTO_FLAGS="-flto=thin"
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
 
-# ── 체크섬 ──────────────────────────────────────────────────────────────────
+# ── 체크섬 ────────────────────────────────────────────────────────────────
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
 ARG FFMPEG_SHA256="c07039598df7d64d3c8b42c4e25b1959fc908621c6f6c2946881133f3b27eda2"
 ARG TAGLIB_SHA256="7e76b5299dcef427c486bffe455098470c8da91cf3ccb9ea804893df57389b5e"
 
-# ── 베이스 이미지 digest 고정 ────────────────────────────────────────────────
+# ── 베이스 이미지 digest 고정 ────────────────────────────────────────────
 ARG DEBIAN_TRIXIE_DIGEST="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
 ARG NODE_DIGEST="sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c"
 ARG GOLANG_DIGEST="sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34"
@@ -35,6 +35,9 @@ RUN git clone --branch "${NAVIDROME_REF}" --depth=1 \
         https://github.com/navidrome/navidrome.git . && \
     git rev-parse --short HEAD > /src/.git_sha
 
+# ════════════════════════════════════════════════════════════════════════════
+# jemalloc 빌드: Zen3 최적화 + tcache 튜닝 수정
+# ════════════════════════════════════════════════════════════════════════════
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS jemalloc-builder
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
@@ -50,15 +53,23 @@ RUN wget -qO jemalloc.tar.bz2 \
     echo "${JEMALLOC_SHA256}  jemalloc.tar.bz2" | sha256sum -c -
 WORKDIR /build/jemalloc-${JEMALLOC_VERSION}
 RUN tar -xjf /build/jemalloc.tar.bz2 --strip-components=1 -C .
+# jemalloc은 --with-jemalloc-prefix 없이 configure하여 LD_PRELOAD 사용 가능하게 함
 RUN CC=clang CXX=clang++ \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
     LDFLAGS="${LTO_FLAGS} -fuse-ld=lld" \
-    ./configure --prefix=/usr/local --disable-cxx && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-cxx \
+        --disable-doc \
+        --enable-prof && \
     make -j${NAVIDROME_BUILD_CORES} install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l \
         -exec strip --strip-unneeded {} +
 
+# ════════════════════════════════════════════════════════════════════════════
+# FFmpeg 빌드: 고성능 오디오 코딩 (libopus 최적화)
+# ════════════════════════════════════════════════════════════════════════════
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS ffmpeg-builder
 ARG FFMPEG_VERSION
 ARG FFMPEG_SHA256
@@ -68,30 +79,32 @@ ARG LTO_FLAGS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang lld llvm pkg-config \
         yasm nasm wget ca-certificates \
-        libmp3lame-dev libopus-dev libvorbis-dev && \
+        libmp3lame-dev libopus-dev libvorbis-dev libavutil-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 RUN wget -qO ffmpeg.tar.bz2 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2" && \
     echo "${FFMPEG_SHA256}  ffmpeg.tar.bz2" | sha256sum -c -
 WORKDIR /build/ffmpeg-${FFMPEG_VERSION}
 RUN tar -xjf /build/ffmpeg.tar.bz2 --strip-components=1 -C .
+# FFmpeg 설정: Opus 트랜스코딩 최적화
 RUN ./configure \
-        --cc=clang --cxx=clang++ \
+        --cc=clang \
+        --cxx=clang++ \
         --extra-cflags="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-        --extra-ldflags="${LTO_FLAGS} -fuse-ld=lld" \
+        --extra-ldflags="${LTO_FLAGS} -fuse-ld=lld -Wl,--gc-sections -Wl,--as-needed" \
         --disable-everything \
         --disable-ffplay \
         --disable-ffprobe \
         --disable-doc \
+        --disable-manpages \
+        --disable-programs \
         --enable-avcodec \
         --enable-avformat \
         --enable-avfilter \
         --enable-swresample \
         --enable-protocol=file,pipe \
         --enable-demuxer=mp3,aac,flac,ogg,wav,aiff,mov,matroska,opus,ape,wv,dsf,caf \
-        --enable-decoder=mp3,mp3float,aac,aac_fixed,flac,vorbis,opus,alac,\
-pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,wavpack,ape,\
-dsd_lsbf_planar,dsd_msbf_planar \
+        --enable-decoder=mp3,mp3float,aac,aac_fixed,flac,vorbis,opus,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,wavpack,ape,dsd_lsbf_planar,dsd_msbf_planar \
         --enable-encoder=libmp3lame,libopus,libvorbis,flac,aac,pcm_s16le \
         --enable-muxer=mp3,flac,ogg,wav,opus,adts \
         --enable-filter=anull,aresample,volume,atrim,afade,aformat \
@@ -99,10 +112,14 @@ dsd_lsbf_planar,dsd_msbf_planar \
         --enable-libmp3lame \
         --enable-libopus \
         --enable-libvorbis \
+        --enable-small \
         --prefix=/usr/local && \
     make -j${NAVIDROME_BUILD_CORES} install && \
     strip --strip-unneeded /usr/local/bin/ffmpeg
 
+# ════════════════════════════════════════════════════════════════════════════
+# Rust 바이너리 빌드: entrypoint + healthcheck
+# ════════════════════════════════════════════════════════════════════════════
 FROM rust:1.94.1-slim@${RUST_DIGEST} AS rust-builder
 ARG NAVIDROME_BUILD_CORES
 ARG RUST_TARGET_CPU
@@ -207,12 +224,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/x86_64-unknown-linux-musl/release/entrypoint /out/entrypoint && \
     cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck
 
+# ════════════════════════════════════════════════════════════════════════════
+# Node.js UI 빌드
+# ════════════════════════════════════════════════════════════════════════════
 FROM node:24.14.1-bookworm-slim@${NODE_DIGEST} AS jsbuilder
 WORKDIR /src/ui
 COPY --from=source /src/ui ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit --fund=false && npm run build
 
+# ════════════════════════════════════════════════════════════════════════════
+# Go 바이너리 빌드: Navidrome main (Zen3 + ThinLTO)
+# ════════════════════════════════════════════════════════════════════════════
 FROM golang:1.26.2-bookworm@${GOLANG_DIGEST} AS gobuilder
 ARG TAGLIB_VERSION
 ARG TAGLIB_SHA256
@@ -226,7 +249,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config wget libutfcpp-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /taglib-build
-# [수정] 정적 링크(-fPIC) 옵션 강제 추가
+# taglib: 정적 링크 + Zen3 최적화
 RUN wget -qO taglib.tar.gz \
         "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" && \
     echo "${TAGLIB_SHA256}  taglib.tar.gz" | sha256sum -c - && \
@@ -247,14 +270,14 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
 COPY --from=jsbuilder /src/ui/build ./ui/build/
 
-# [수정] CGO_LDFLAGS에 -lz (zlib) 및 -lm 명시, go build 명령어 한 줄 병합
+# Go 빌드: CGO 링킹 최적화
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed"
+    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro -Wl,-z,now"
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
@@ -265,9 +288,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
         -o /out/navidrome .
 
+# ════════════════════════════════════════════════════════════════════════════
+# 최종 런타임 이미지
+# ════════════════════════════════════════════════════════════════════════════
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS release
 LABEL maintainer="JBS Networks"
-LABEL optimization="Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck"
+LABEL optimization="Zen3/Clang/ThinLTO/Jemalloc-OptimizedConfig/HighPerformanceFFmpeg"
 LABEL org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -280,7 +306,7 @@ COPY --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
-# FFMPEG_THREADS를 정수로 강제 검증하여 셸 인젝션 차단
+# FFmpeg 래퍼: FFMPEG_THREADS 안전성 검증
 RUN mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
     cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
@@ -311,7 +337,7 @@ ARG SCANSCHEDULE
 
 ENV TZ=Asia/Seoul \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,tcache_ncached_max:256,experimental_tcache_gc:true,disable_large_size_classes:true,calloc_madvise_threshold:131072,process_madvise_max_batch:64,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:1024,experimental_tcache_gc:true,disable_large_size_classes:true,calloc_madvise_threshold:262144,process_madvise_max_batch:64,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false,abort_conf:false" \
     GOMEMLIMIT=${GOMEMLIMIT} \
     FFMPEG_THREADS=${NAVIDROME_BUILD_CORES} \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
