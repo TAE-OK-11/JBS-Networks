@@ -6,7 +6,7 @@
 #
 # 변경점(4.9 대비):
 #  - FROM debian:trixie-slim digest 고정 (재현 가능 빌드 / 공급망 보안)
-#  - builder apt-get 에서 미사용 golang 패키지 제거
+#  - builder apt-get: golang 복원 (AWS-LC cmake가 err_data.c 등 코드 생성에 사용)
 #  - jemalloc configure: --disable-stats --enable-readlinkat 추가
 #    (atomic 감소 + /proc 의존성 제거, navidrome 빌드와 통일)
 #  - PCRE2 configure: --disable-static --disable-pcre2-16 --disable-pcre2-32
@@ -91,6 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
+    golang \
     lld \
     llvm \
     ninja-build \
