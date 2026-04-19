@@ -225,11 +225,13 @@ RUN set -eux; \
       --add-module=/tmp/ngx_http_zstd_module \
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
       --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -L/opt/awslc/lib -L/usr/local/lib -lssl -lcrypto -lpcre2-8 -lz -lzstd -lbrotlienc -lbrotlicommon"; \
-    make -j"$(nproc)"; \
-    make install; \
-    strip -s /usr/sbin/nginx; \
-    ldd /usr/sbin/nginx | tee /tmp/nginx.ldd.txt; \
-    ! grep -q 'not found' /tmp/nginx.ldd.txt
+    make -j"$(nproc)" && make install && \
+    strip -s /usr/sbin/nginx && \
+    if compgen -G "/usr/lib/nginx/modules/*.so" > /dev/null; then \
+      strip -s /usr/lib/nginx/modules/*.so; \
+    fi && \
+    ldd /usr/sbin/nginx | tee /tmp/nginx.ldd.txt && \
+    ! grep -q "not found" /tmp/nginx.ldd.txt
 
 FROM debian:trixie-slim AS runtime
 
@@ -253,18 +255,23 @@ COPY --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
 COPY --from=builder /opt/awslc/lib/libcrypto.so* /opt/awslc/lib/
 
 RUN set -eux; \
-    mkdir -p /var/log/nginx /var/cache/nginx /run; \
-    chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx; \
-    ln -sf /dev/stdout /var/log/nginx/access.log; \
-    ln -sf /dev/stderr /var/log/nginx/error.log; \
-    printf '/usr/local/lib\n/opt/awslc/lib\n' > /etc/ld.so.conf.d/custom-nginx.conf; \
-    ldconfig; \
+    mkdir -p /etc/nginx/logs /var/log/nginx /var/cache/nginx /run && \
+    chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx && \
+    ln -sf /dev/stdout /etc/nginx/logs/access.log && \
+    ln -sf /dev/stderr /etc/nginx/logs/error.log && \
+    ln -sf /dev/stdout /var/log/nginx/access.log && \
+    ln -sf /dev/stderr /var/log/nginx/error.log && \
+    printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf && \
+    ldconfig && \
+    nginx -V && \
     nginx -t
 
-ENV LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF=background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,tcache_ncached_max:256,experimental_tcache_gc:true,disable_large_size_classes:true,calloc_madvise_threshold:131072,process_madvise_max_batch:64,dirty_decay_ms:30000,muzzy_decay_ms:30000,stats_print:false
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000,stats_print:false"
 
 EXPOSE 80 443/tcp 443/udp
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD nginx -t || exit 1
 STOPSIGNAL SIGQUIT
 
 LABEL project="JBS Networks 4.3" \
