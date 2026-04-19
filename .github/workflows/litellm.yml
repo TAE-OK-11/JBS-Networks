@@ -7,10 +7,25 @@ on:
       - "litellm/**"
       - ".github/workflows/jbs-litellm-extreme-build.yml"
   workflow_dispatch:
+    inputs:
+      litellm_ref:
+        description: "LiteLLM git ref (tag / branch / sha). v1.82.7 ~ v1.82.8 은 공급망 공격 버전이므로 사용 금지."
+        required: false
+        default: "v1.83.3-stable"
+      image_tag:
+        description: "Primary image tag"
+        required: false
+        default: "extreme-4.4"
+
+env:
+  LITELLM_REF: ${{ github.event.inputs.litellm_ref || 'v1.83.3-stable' }}
+  IMAGE_TAG:   ${{ github.event.inputs.image_tag   || 'extreme-4.4' }}
+  IMAGE_NAME:  jbs-litellm
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120   # Clang+ThinLTO + admin UI 빌드로 길어질 수 있음
 
     permissions:
       contents: read
@@ -26,37 +41,63 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BerriAI/litellm
-          ref: v1.83.3-stable
+          ref: ${{ env.LITELLM_REF }}
           path: litellm-src
 
-      - name: Verify LiteLLM Source Layout
+      - name: Reject Compromised LiteLLM Versions
+        # 2026-03 Trivy 공급망 사고로 배포된 악성 버전 차단
         run: |
           set -eux
-          ls -la litellm-src
-          test -f litellm-src/pyproject.toml
-          test -f litellm-src/uv.lock
-          test -f litellm-src/schema.prisma
-          test -f litellm-src/package.json
-          test -f litellm-src/package-lock.json
-          test -d litellm-src/enterprise
-          test -d litellm-src/litellm-proxy-extras
-          test -d litellm-src/docker
+          case "${LITELLM_REF}" in
+            *1.82.7*|*1.82.8*)
+              echo "::error::Refusing to build known-compromised LiteLLM version: ${LITELLM_REF}"
+              exit 1
+              ;;
+          esac
+
+      - name: Verify LiteLLM Source Layout (v1.83+ requirements)
+        run: |
+          set -eux
+          cd litellm-src
+
+          # --- 기존 공통 요구사항 -------------------------------------
+          test -f pyproject.toml
+          test -f uv.lock
+          test -f schema.prisma
+          test -d enterprise
+          test -f enterprise/pyproject.toml
+          test -d litellm-proxy-extras
+          test -f litellm-proxy-extras/pyproject.toml
+          test -d docker
+
+          # --- entrypoint 스크립트 ------------------------------------
+          test -f docker/entrypoint.sh
+          test -f docker/prod_entrypoint.sh
+
+          # --- v1.83+ 신규 필수 파일 ----------------------------------
+          # 이게 없으면 새 Dockerfile 이 중간에 깨짐
+          test -f docker/build_admin_ui.sh       # Admin UI Next.js 빌드 스크립트
+          test -f docker/supervisord.conf        # prod_entrypoint.sh 가 참조
+
+          # --- admin UI 소스 ------------------------------------------
+          test -d ui
+
+          echo "LiteLLM ${LITELLM_REF} source layout OK for v1.83+ build."
 
       - name: Inject Custom Dockerfile
         run: |
-          cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
-
-      - name: Optional sanity diff
-        run: |
           set -eux
-          test -f litellm-src/Dockerfile
-          head -n 40 litellm-src/Dockerfile
+          cp custom-repo/litellm/Dockerfile litellm-src/Dockerfile
+          head -n 10 litellm-src/Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -68,10 +109,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_USERNAME }}/jbs-litellm
+          images: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=extreme-4.3
+            type=raw,value=${{ env.IMAGE_TAG }}
             type=raw,value=latest
+            type=raw,value=${{ env.LITELLM_REF }}
             type=sha,format=short
 
       - name: Build and Push
@@ -85,10 +127,25 @@ jobs:
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # NOTE: Dockerfile 에 존재하는 ARG 만 전달.
+          # BASE_IMAGE 는 새 Dockerfile 에 없으므로 제거.
+          # Python 3.11 slim-bookworm 을 기본으로 사용하며 override 하려면
+          # LITELLM_BUILD_IMAGE / LITELLM_RUNTIME_IMAGE 로 전달할 것.
           build-args: |
-            BASE_IMAGE=debian:trixie
             CPU_FLAGS=-O3 -march=znver3 -mtune=znver3 -mavx2 -mfma -mbmi2 -madx -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 -pipe
             LTO_FLAGS=-flto=full -fuse-ld=lld
             RUSTFLAGS_NATIVE=-C target-cpu=znver3 -C opt-level=3 -C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat -C codegen-units=1
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### JBS LiteLLM Extreme Build"
+            echo ""
+            echo "- **LiteLLM ref**: \`${LITELLM_REF}\`"
+            echo "- **Primary tag**: \`${IMAGE_TAG}\`"
+            echo "- **Image**: \`${{ secrets.DOCKER_USERNAME }}/${IMAGE_NAME}\`"
+            echo "- **Target**: AMD Zen3 / EPYC · Clang+ThinLTO · jemalloc THP"
+          } >> "$GITHUB_STEP_SUMMARY"
