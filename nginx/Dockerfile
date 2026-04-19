@@ -16,7 +16,7 @@ ARG AWSLC_VERSION=v1.72.0
 ARG JEMALLOC_VERSION=5.3.1
 ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
 
-ARG ZLIBRS_VERSION=0.6.3
+ARG ZLIBRS_VERSION=v0.6.3
 
 ARG ZSTD_VERSION=1.5.7
 ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
@@ -154,9 +154,9 @@ RUN set -eux; \
     install -Dm755 "${CARGO_CINSTALL}" /usr/local/bin/cargo-cinstall; \
     rm -rf /tmp/cargo-c.tar.gz /tmp/cargo-c-tmp; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1" \
+    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C llvm-args=-enable-dfa-jump-thread" \
       cargo-cbuild --release --prefix=/usr/local --libdir=/usr/local/lib; \
-    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1" \
+    RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C llvm-args=-enable-dfa-jump-thread" \
       cargo-cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
     if [ -d /usr/local/include/libz_rs ]; then \
       cp /usr/local/include/libz_rs/zlib.h /usr/local/include/zlib.h; \
