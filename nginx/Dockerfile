@@ -141,10 +141,14 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 4) zlib-rs
-# NOTE: cargo cinstall --libdir=/usr/local/lib 지정 시
-#       libz_rs.pc가 /usr/local/lib/pkgconfig/에 직접 설치됨.
-#       이미 존재하는 파일을 같은 경로에 cp하면 set -e 환경에서
-#       "same file" 오류로 빌드가 실패하므로 해당 cp 블록을 제거함.
+# NOTE: cargo cinstall --libdir=/usr/local/lib 이 이미 /usr/local/lib 에
+#       libz_rs.so(+ 버전 심볼릭 링크/헤더/pkgconfig)를 직접 설치함.
+#       이 경로로 다시 `cp` 또는 `install`을 호출하면 GNU install의
+#       "are the same file" 검사에 걸려 set -e 환경에서 exit 1 로 실패함.
+#       따라서 재설치 단계 없이 실제 regular file만 탐지 → patchelf → symlink 로 처리함.
+#       또한 일부 cargo-c 구성은 실제 파일을 libz_rs.so.X.Y.Z 로 두고
+#       libz_rs.so 를 심볼릭 링크로 설치하므로 `-type f` 단독 탐색은 실패할 수 있음.
+#       → `readlink -f` + 규칙 기반 fallback 으로 robust 하게 탐지.
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
@@ -164,20 +168,34 @@ RUN set -eux; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
     export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C llvm-args=-enable-dfa-jump-thread"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
-    # 일부 버전에서 헤더가 서브디렉터리에 설치될 경우 대비한 방어 코드
+    # 헤더가 /usr/local/include/libz_rs/ 하위에 설치될 경우 canonical 경로에 복사 (이미 있으면 skip) \
     if [ -d /usr/local/include/libz_rs ]; then \
-      cp /usr/local/include/libz_rs/zlib.h /usr/local/include/zlib.h; \
-      cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h || true; \
+      [ -e /usr/local/include/zlib.h ]  || cp /usr/local/include/libz_rs/zlib.h  /usr/local/include/zlib.h; \
+      [ -e /usr/local/include/zconf.h ] || cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h || true; \
     fi; \
-    # libz_rs.so 실제 설치 경로 탐지 후 /usr/local/lib/에 정규화
-    LIBZ_RS="$(find /usr/local -type f -name 'libz_rs.so' | head -n1)"; \
-    test -n "${LIBZ_RS}"; \
-    install -Dm755 "${LIBZ_RS}" /usr/local/lib/libz_rs.so; \
-    # SONAME을 libz.so.1로 교정 → nginx ELF NEEDED 항목과 일치
-    patchelf --set-soname libz.so.1 /usr/local/lib/libz_rs.so; \
-    ln -sf libz_rs.so /usr/local/lib/libz.so.1; \
-    ln -sf libz_rs.so /usr/local/lib/libz.so; \
-    strip --strip-debug /usr/local/lib/libz_rs.so || true
+    # 실제 regular .so 파일 탐지 (심볼릭 링크면 readlink -f 로 실체 경로 획득) \
+    cd /usr/local/lib; \
+    REAL_SO=""; \
+    if [ -f libz_rs.so ] && [ ! -L libz_rs.so ]; then \
+      REAL_SO="libz_rs.so"; \
+    elif [ -L libz_rs.so ]; then \
+      REAL_SO="$(basename "$(readlink -f libz_rs.so)")"; \
+    else \
+      REAL_SO="$(find . -maxdepth 1 -type f -name 'libz_rs.so*' -printf '%f\n' | head -n1)"; \
+    fi; \
+    test -n "${REAL_SO}"; \
+    test -f "/usr/local/lib/${REAL_SO}"; \
+    # SONAME 을 libz.so.1 로 교정 → nginx ELF NEEDED 항목과 일치 \
+    patchelf --set-soname libz.so.1 "/usr/local/lib/${REAL_SO}"; \
+    # canonical 'libz_rs.so' 이름 보장 (runtime stage 의 COPY 구문이 이 이름을 기대함) \
+    if [ ! -e /usr/local/lib/libz_rs.so ]; then \
+      ln -sf "${REAL_SO}" /usr/local/lib/libz_rs.so; \
+    fi; \
+    # zlib 호환 심볼릭 링크 재생성 (기존 파일/링크 제거 후 생성 → set -e 충돌 방지) \
+    rm -f /usr/local/lib/libz.so /usr/local/lib/libz.so.1; \
+    ln -sf "${REAL_SO}" /usr/local/lib/libz.so.1; \
+    ln -sf "${REAL_SO}" /usr/local/lib/libz.so; \
+    strip --strip-debug "/usr/local/lib/${REAL_SO}" || true
 
 # ---------------------------------------------------------
 # 5) zstd
