@@ -23,7 +23,7 @@ ARG ZSTD_VERSION=1.5.7
 ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
-ARG NGX_BROTLI_REF=a71f931603a7e3905087349927d693ca6972046d
+ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
@@ -33,6 +33,7 @@ ARG LTO_FLAGS="-flto=full"
 # =========================================================
 FROM debian:trixie-slim AS builder
 
+ARG TARGETARCH
 ARG NGINX_VERSION
 ARG NGINX_SHA256
 ARG PCRE2_VERSION
@@ -106,8 +107,6 @@ RUN set -eux; \
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
-    # CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON 은 CMake가 -flto=thin 을 자동 추가해
-    # CMAKE_C_FLAGS 의 -flto=full 과 충돌함. LTO 는 FLAGS에서 명시 제어하므로 IPO 제거.
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
@@ -142,20 +141,17 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 4) zlib-rs
-# NOTE: cargo cinstall --libdir=/usr/local/lib 이 이미 /usr/local/lib 에
-#       libz_rs.so(+ 버전 심볼릭 링크/헤더/pkgconfig)를 직접 설치함.
-#       이 경로로 다시 `cp` 또는 `install`을 호출하면 GNU install의
-#       "are the same file" 검사에 걸려 set -e 환경에서 exit 1 로 실패함.
-#       따라서 재설치 단계 없이 실제 regular file만 탐지 → patchelf → symlink 로 처리함.
-#       또한 일부 cargo-c 구성은 실제 파일을 libz_rs.so.X.Y.Z 로 두고
-#       libz_rs.so 를 심볼릭 링크로 설치하므로 `-type f` 단독 탐색은 실패할 수 있음.
-#       → `readlink -f` + 규칙 기반 fallback 으로 robust 하게 탐지.
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
+    case "${TARGETARCH}" in \
+      amd64)  CARGOC_ARCH="x86_64-unknown-linux-musl" ;; \
+      arm64)  CARGOC_ARCH="aarch64-unknown-linux-musl" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
     curl -fsSL \
-      "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
+      "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-${CARGOC_ARCH}.tar.gz" \
       -o /tmp/cargo-c.tar.gz; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
@@ -167,14 +163,12 @@ RUN set -eux; \
     install -Dm755 "${CARGO_CINSTALL}" /usr/local/bin/cargo-cinstall; \
     rm -rf /tmp/cargo-c.tar.gz /tmp/cargo-c-tmp; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C llvm-args=-enable-dfa-jump-thread"; \
+    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
-    # 헤더가 /usr/local/include/libz_rs/ 하위에 설치될 경우 canonical 경로에 복사 (이미 있으면 skip) \
     if [ -d /usr/local/include/libz_rs ]; then \
       [ -e /usr/local/include/zlib.h ]  || cp /usr/local/include/libz_rs/zlib.h  /usr/local/include/zlib.h; \
       [ -e /usr/local/include/zconf.h ] || cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h || true; \
     fi; \
-    # 실제 regular .so 파일 탐지 (심볼릭 링크면 readlink -f 로 실체 경로 획득) \
     cd /usr/local/lib; \
     REAL_SO=""; \
     if [ -f libz_rs.so ] && [ ! -L libz_rs.so ]; then \
@@ -186,13 +180,10 @@ RUN set -eux; \
     fi; \
     test -n "${REAL_SO}"; \
     test -f "/usr/local/lib/${REAL_SO}"; \
-    # SONAME 을 libz.so.1 로 교정 → nginx ELF NEEDED 항목과 일치 \
     patchelf --set-soname libz.so.1 "/usr/local/lib/${REAL_SO}"; \
-    # canonical 'libz_rs.so' 이름 보장 (runtime stage 의 COPY 구문이 이 이름을 기대함) \
     if [ ! -e /usr/local/lib/libz_rs.so ]; then \
       ln -sf "${REAL_SO}" /usr/local/lib/libz_rs.so; \
     fi; \
-    # zlib 호환 심볼릭 링크 재생성 (기존 파일/링크 제거 후 생성 → set -e 충돌 방지) \
     rm -f /usr/local/lib/libz.so /usr/local/lib/libz.so.1; \
     ln -sf "${REAL_SO}" /usr/local/lib/libz.so.1; \
     ln -sf "${REAL_SO}" /usr/local/lib/libz.so; \
@@ -214,34 +205,32 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 6) Brotli + nginx zstd module
-# NOTE: NGX_BROTLI_REF 는 브랜치/태그가 아닌 커밋 SHA 이므로
-#       --depth=1 shallow clone 후 `git fetch <sha>` 는 GitHub 서버가
-#       임의 SHA 직접 fetch 를 거부해 exit 128 로 실패함.
-#       → --filter=blob:none (blobless partial clone) 사용:
-#         커밋/트리 메타데이터는 전부 받고, 블롭은 checkout 시점에만 받아옴.
-#         임의 SHA checkout 이 가능하면서 full clone 보다 빠름.
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --filter=blob:none \
       https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
     cd /tmp/ngx_brotli; \
-    git checkout "${NGX_BROTLI_REF}"; \
-    git submodule update --init --recursive --filter=blob:none -j8; \
-    # CMAKE_C_COMPILER=clang: 명시하지 않으면 CC env 가 무시되고 gcc 가 선택될 수 있음.
-    # CMAKE_INSTALL_LIBDIR=lib: Debian 에서 GNUInstallDirs 가 기본값으로
-    #   lib/x86_64-linux-gnu/ 를 사용하므로, 명시하지 않으면 libbrotli*.so 가
-    #   /usr/local/lib/x86_64-linux-gnu/ 에 설치되어 뒤따르는 COPY 및
-    #   nginx -L/usr/local/lib 에서 라이브러리를 찾지 못함.
+    git checkout "${NGX_BROTLI_REF}"
+
+RUN set -eux; \
+    cd /tmp/ngx_brotli; \
+    git submodule update --init --recursive --filter=blob:none -j8
+
+RUN set -eux; \
     cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_C_COMPILER=clang \
+      -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
-    cmake --install /tmp/ngx_brotli/deps/brotli/out; \
+    cmake --install /tmp/ngx_brotli/deps/brotli/out
+
+RUN set -eux; \
     git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
       https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module
 
@@ -351,15 +340,11 @@ RUN set -eux; \
       /var/cache/nginx/scgi_temp \
       /run; \
     chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx; \
-    # /etc/nginx/logs → /var/log/nginx 심볼릭 링크
-    # rm -rf 선행으로 "디렉터리 내부에 링크 생성" 문제 방지
     rm -rf /etc/nginx/logs; \
     ln -sf /var/log/nginx /etc/nginx/logs; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf; \
-    # COPY는 심볼릭 링크를 follow하므로 libz_rs.so 실체만 복사됨.
-    # libz 호환 심볼릭 링크를 runtime에서 재생성
     ln -sf libz_rs.so /usr/local/lib/libz.so.1; \
     ln -sf libz_rs.so /usr/local/lib/libz.so; \
     ldconfig; \
@@ -373,8 +358,6 @@ ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
 
 EXPOSE 80 443/tcp 443/udp
 
-# HTTP healthcheck: nginx가 127.0.0.1:80에서 HTTP를 서비스한다고 가정.
-# stream-only/TCP-only 배포 시 적합한 probe로 교체 필요.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fs http://127.0.0.1/ || exit 1
 
