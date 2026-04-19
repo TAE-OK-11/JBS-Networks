@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
-# =========================================================
-# JBS Networks NGINX 4.8 - stabilized final
-# 2026-04-19
-# =========================================================
+# This Dockerfile is based on the optimized JBS Networks NGINX 4.8 build.
+# It retains the key dependencies requested by the user (AWS‑LC, jemalloc,
+# nginx 1.30.0 and zlib‑rs) while addressing a configure‑time failure
+# triggered by nginx’s detection of the zlib library.  The upstream build
+# attempted to replace the C implementation of zlib with a Rust
+# implementation (zlib‑rs), but nginx’s configure script could not find
+# the library when checking for `deflate` support.  To resolve this we
+# ensure the Rust‑based library is visible to the compiler during
+# configure by exporting appropriate CFLAGS and LDFLAGS, running
+# ldconfig after installation and adjusting the linker search path.  See
+# the build stage labelled “NGINX” for details.
 
 ARG NGINX_VERSION=1.30.0
 ARG NGINX_SHA256=058188c64bf22baecaa72b809a6318a4f9ba623889c554feab03f7cb853ab31b
@@ -25,12 +32,12 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
+# Compiler optimisation flags for Zen 3 class CPUs.  Feel free to
+# override these at build time via `--build-arg CPU_FLAGS=...` if
+# targeting another micro‑architecture.
 ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
 
-# =========================================================
-# Builder
-# =========================================================
 FROM debian:trixie-slim AS builder
 
 ARG TARGETARCH
@@ -60,7 +67,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NM=llvm-nm \
     LD=ld.lld
 
-# 이 Dockerfile은 사실상 x86_64(znver3) 전용
+# Validate architecture.  This image is tuned for x86‑64/znver3; fail
+# early if another architecture is requested.
 RUN case "${TARGETARCH:-amd64}" in \
       amd64|"") echo "Building for amd64/znver3";; \
       *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/znver3 only." >&2; exit 1;; \
@@ -89,9 +97,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 1) PCRE2
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
@@ -108,9 +116,9 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libpcre2-8.so* || true
 
-# ---------------------------------------------------------
-# 2) AWS-LC
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 2) AWS‑LC
+# ---------------------------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
@@ -127,9 +135,9 @@ RUN set -eux; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true
 
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 3) jemalloc
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -145,9 +153,15 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true
 
-# ---------------------------------------------------------
-# 4) zlib-rs
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 4) zlib‑rs
+# ---------------------------------------------------------------------------
+#
+# The Rust‑based zlib implementation (`zlib‑rs`) is built and installed via
+# cargo‑c.  After installation we run ldconfig so that libz.so can be
+# discovered by the linker.  We also expose the headers in the usual
+# include path.  Without these steps nginx’s configure test will fail
+# with “zlib library … not found”.
 RUN set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
@@ -165,10 +179,12 @@ RUN set -eux; \
     rm -rf /tmp/cargo-c.tar.gz /tmp/cargo-c-tmp; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
     export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"; \
+    # build and install the shared and static libraries
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
+    # copy headers into the standard include location for C projects
     if [ -d /usr/local/include/libz_rs ]; then \
       [ -e /usr/local/include/zlib.h ]  || cp /usr/local/include/libz_rs/zlib.h  /usr/local/include/zlib.h; \
-      [ -e /usr/local/include/zconf.h ] || cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h || true; \
+      [ -e /usr/local/include/zconf.h ] || cp /usr/local/include/libz_rs/zconf.h /usr/local/include/zconf.h; \
     fi; \
     cd /usr/local/lib; \
     REAL_SO=""; \
@@ -180,17 +196,19 @@ RUN set -eux; \
       REAL_SO="$(find . -maxdepth 1 -type f -name 'libz_rs.so*' -printf '%f\n' | head -n1)"; \
     fi; \
     test -n "${REAL_SO}"; \
-    test -f "/usr/local/lib/${REAL_SO}"; \
     install -Dm755 "/usr/local/lib/${REAL_SO}" /usr/local/lib/libz.so.1.0.0; \
     patchelf --set-soname libz.so.1 /usr/local/lib/libz.so.1.0.0; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz_rs.so; \
+    # ensure the linker cache is up to date so -lz resolves libz-rs
+    ldconfig; \
+    # strip debug symbols
     strip --strip-debug /usr/local/lib/libz.so.1.0.0 || true
 
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 5) zstd
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 RUN set -eux; \
     wget -qO "zstd-${ZSTD_VERSION}.tar.gz" \
       "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
@@ -202,9 +220,9 @@ RUN set -eux; \
     make -j"$(nproc)" install PREFIX=/usr/local; \
     strip -s /usr/local/lib/libzstd.so* || true
 
-# ---------------------------------------------------------
-# 6) Brotli + nginx zstd module
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 6) Brotli & nginx zstd module
+# ---------------------------------------------------------------------------
 RUN set -eux; \
     git clone --filter=blob:none \
       https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
@@ -215,6 +233,7 @@ RUN set -eux; \
     cd /tmp/ngx_brotli; \
     git submodule update --init --recursive --filter=blob:none
 
+# Build Brotli as a shared library.  Do not specify --target brotlienc
 RUN set -eux; \
     cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
@@ -234,9 +253,19 @@ RUN set -eux; \
     git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
       https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module
 
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 7) NGINX
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# During the nginx configure step the build system attempts to detect
+# whether libz is available by compiling a small program that calls
+# deflate() and links with -lz.  When using the Rust implementation
+# this detection can fail unless the compiler is explicitly told
+# where to find zlib.h and libz.so.  To fix this we set CFLAGS and
+# LDFLAGS to include /usr/local/include and /usr/local/lib ahead of
+# invoking ./configure.  Without these environment variables the
+# configure script may report “the HTTP gzip module requires the zlib
+# library” and abort.
 RUN set -eux; \
     curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
       -o "nginx-${NGINX_VERSION}.tar.gz"; \
@@ -244,8 +273,12 @@ RUN set -eux; \
     tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; \
     mv "nginx-${NGINX_VERSION}" /tmp/nginx; \
     cd /tmp/nginx; \
+    # fix zstd module config to use dynamic library
     sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config; \
     export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"; \
+    # set CFLAGS/LDFLAGS so that the zlib-rs headers and library are picked up
+    export CFLAGS="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include"; \
+    export LDFLAGS="-L/opt/awslc/lib -L/usr/local/lib -fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-rpath,/opt/awslc/lib:/usr/local/lib"; \
     ./configure \
       --prefix=/etc/nginx \
       --sbin-path=/usr/sbin/nginx \
@@ -283,6 +316,7 @@ RUN set -eux; \
       --with-stream_ssl_preread_module \
       --add-module=/tmp/ngx_brotli \
       --add-module=/tmp/ngx_http_zstd_module \
+      # pass our optimisation flags and include paths
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
       --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -L/opt/awslc/lib -L/usr/local/lib -lssl -lcrypto -lpcre2-8 -lz -lzstd -lbrotlienc -lbrotlicommon"; \
     make -j"$(nproc)"; \
@@ -291,13 +325,14 @@ RUN set -eux; \
     if compgen -G "/usr/lib/nginx/modules/*.so" > /dev/null; then \
       strip -s /usr/lib/nginx/modules/*.so; \
     fi; \
+    # verify HTTP/3 support and ensure all libraries are found
     nginx -V 2>&1 | grep -q -- '--with-http_v3_module'; \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
     ! grep -q "not found" /tmp/builder_ldd.txt
 
-# =========================================================
-# Runtime
-# =========================================================
+# ---------------------------------------------------------------------------
+# Runtime stage
+# ---------------------------------------------------------------------------
 FROM debian:trixie-slim AS runtime
 
 ARG NGINX_VERSION
@@ -343,6 +378,7 @@ RUN set -eux; \
     ln -sf /var/log/nginx /etc/nginx/logs; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
+    # ensure libz.so symlinks exist in runtime image
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/custom-libs.conf; \
@@ -362,7 +398,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks 4.8 Rust-Optimized" \
+LABEL project="JBS Networks 4.8 Rust‑Optimized" \
       nginx.version="${NGINX_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
       zlib-rs.version="${ZLIBRS_VERSION}" \
