@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1
 # JBS Networks — Navidrome Ultra (Zen3 / Clang+ThinLTO / jemalloc / Custom-FFmpeg)
-# v5.0 — 2026-04-19 최적화 패스: TagLib LIBDIR 버그수정, ffmpeg 레이어 통합,
-#         CGO RELRO/NX 하드닝, COPY --link 캐시 최적화
 
 ARG NAVIDROME_REF=v0.61.2
 ARG TAGLIB_VERSION=2.2.1
@@ -253,9 +251,7 @@ RUN wget -qO taglib.tar.gz \
           -DCMAKE_RANLIB=llvm-ranlib \
           -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
           -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} -fPIC" \
-          -DCMAKE_EXE_LINKER_FLAGS="${LTO_FLAGS} -fuse-ld=lld" \
-          -DCMAKE_INSTALL_PREFIX=/usr/local \
-          -DCMAKE_INSTALL_LIBDIR=lib . && \
+          -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j${NAVIDROME_BUILD_CORES} install
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
@@ -269,7 +265,7 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CC=clang \
     CXX=clang++ \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now,-z,noexecstack"
+    CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed"
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
@@ -290,15 +286,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libmp3lame0 libopus0 libvorbis0a libvorbisenc2 libvorbisfile3 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
+COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # FFMPEG_THREADS를 정수로 강제 검증하여 셸 인젝션 차단
-# tee <<'SH' && chmod 을 한 RUN에 묶어 레이어 1개 절감
 RUN mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
-    tee /usr/local/bin/ffmpeg <<'SH' && chmod 755 /usr/local/bin/ffmpeg
+    cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
 THREADS=$(printf '%d' "${FFMPEG_THREADS:-2}" 2>/dev/null)
 if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
@@ -306,6 +301,7 @@ if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
 fi
 exec /usr/local/bin/ffmpeg.real -threads "$THREADS" "$@"
 SH
+RUN chmod 755 /usr/local/bin/ffmpeg
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
@@ -313,9 +309,9 @@ RUN groupadd -g 1000 navidrome && \
     touch /.nddockerenv && \
     chown -R 1000:1000 /app /data /music
 
-COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
-COPY --link --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
-COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
+COPY --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
+COPY --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
+COPY --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
 
 USER 1000:1000
 VOLUME ["/data", "/music"]
