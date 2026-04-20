@@ -1,24 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.0 - 최적화 패스
+# JBS Networks NGINX 4.9 - zlib-rs header path hardened
 # 2026-04-19
 #
-# 변경점(4.9 대비):
-#  - FROM debian:trixie-slim digest 고정 (재현 가능 빌드 / 공급망 보안)
-#  - builder apt-get: golang 복원 (AWS-LC cmake가 err_data.c 등 코드 생성에 사용)
-#  - jemalloc configure: --disable-stats --enable-readlinkat 추가
-#    (atomic 감소 + /proc 의존성 제거, navidrome 빌드와 통일)
-#  - PCRE2 configure: --disable-static --disable-pcre2-16 --disable-pcre2-32
-#    (nginx는 8-bit 동적 링크만 필요, 불필요한 정적 라이브러리 빌드 제거)
-#  - nginx --with-ld-opt: -z,relro,-z,now,-z,noexecstack 추가 (RELRO + NX)
-#  - runtime apt-get: wget 추가, HEALTHCHECK를 실제 HTTP 요청으로 교체
-#    (기존 nginx -t 는 config 문법만 검사 → 프로세스 다운 미감지)
-#  - runtime COPY 명령에 --link 추가 (BuildKit 레이어 독립 캐싱)
-#  - runtime ENV DEBIAN_FRONTEND 제거 (apt-get RUN 인라인으로 이동)
+# 변경점(4.8 대비):
+#  - zlib-rs 섹션에서 cargo-c가 설치한 zlib.h/zconf.h 위치가
+#    버전/패키지 메타데이터에 따라 달라지는 문제를 해결.
+#    여러 후보 경로 + 소스 트리 폴백으로 /usr/local/include/zlib.h 보장.
+#  - 설치 결과 디버그 출력(find) 추가.
+#  - 헤더 내용 sanity check (z_stream / Z_NO_FLUSH).
+#  - nginx configure 직전 pre-flight 테스트(실제 clang으로
+#    #include <zlib.h> + -lz 컴파일/링크)로 조기 실패 유도.
 # =========================================================
-
-ARG DEBIAN_TRIXIE_DIGEST="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
 
 ARG NGINX_VERSION=1.30.0
 ARG NGINX_SHA256=058188c64bf22baecaa72b809a6318a4f9ba623889c554feab03f7cb853ab31b
@@ -46,9 +40,8 @@ ARG LTO_FLAGS="-flto=full"
 # =========================================================
 # Builder
 # =========================================================
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS builder
+FROM debian:trixie-slim AS builder
 
-ARG DEBIAN_TRIXIE_DIGEST
 ARG TARGETARCH
 ARG NGINX_VERSION
 ARG NGINX_SHA256
@@ -119,10 +112,7 @@ RUN set -eux; \
     ./configure \
       --prefix=/usr/local \
       --enable-jit \
-      --enable-shared \
-      --disable-static \
-      --disable-pcre2-16 \
-      --disable-pcre2-32; \
+      --enable-shared; \
     make -j"$(nproc)"; \
     make install; \
     strip -s /usr/local/lib/libpcre2-8.so* || true
@@ -159,9 +149,7 @@ RUN set -eux; \
     LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
     ./configure \
       --prefix=/usr/local \
-      --disable-cxx \
-      --disable-stats \
-      --enable-readlinkat; \
+      --disable-cxx; \
     make -j"$(nproc)"; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true
@@ -391,7 +379,7 @@ RUN set -eux; \
       --add-module=/tmp/ngx_brotli \
       --add-module=/tmp/ngx_http_zstd_module \
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
-      --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-z,relro,-z,now,-z,noexecstack -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -L/opt/awslc/lib -L/usr/local/lib -lssl -lcrypto -lpcre2-8 -lz -lzstd -lbrotlienc -lbrotlicommon"; \
+      --with-ld-opt="-fuse-ld=lld ${LTO_FLAGS} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections -Wl,-rpath,/opt/awslc/lib:/usr/local/lib -L/opt/awslc/lib -L/usr/local/lib -lssl -lcrypto -lpcre2-8 -lz -lzstd -lbrotlienc -lbrotlicommon"; \
     make -j"$(nproc)"; \
     make install; \
     strip -s /usr/sbin/nginx; \
@@ -405,9 +393,8 @@ RUN set -eux; \
 # =========================================================
 # Runtime
 # =========================================================
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS runtime
+FROM debian:trixie-slim AS runtime
 
-ARG DEBIAN_TRIXIE_DIGEST
 ARG NGINX_VERSION
 ARG AWSLC_VERSION
 ARG ZLIBRS_VERSION
@@ -418,24 +405,24 @@ ARG JEMALLOC_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
-    apt-get install -y --no-install-recommends \
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r nginx && useradd -r -g nginx -s /usr/sbin/nologin nginx
 
-COPY --link --from=builder /usr/sbin/nginx /usr/sbin/nginx
-COPY --link --from=builder /etc/nginx /etc/nginx
+COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
+COPY --from=builder /etc/nginx /etc/nginx
 
-COPY --link --from=builder /usr/local/lib/libpcre2-8.so*  /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libzstd.so*     /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libbrotli*.so*  /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libz.so.1.0.0   /usr/local/lib/
-COPY --link --from=builder /opt/awslc/lib/libssl.so*      /opt/awslc/lib/
-COPY --link --from=builder /opt/awslc/lib/libcrypto.so*   /opt/awslc/lib/
+COPY --from=builder /usr/local/lib/libpcre2-8.so*  /usr/local/lib/
+COPY --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libzstd.so*     /usr/local/lib/
+COPY --from=builder /usr/local/lib/libbrotli*.so*  /usr/local/lib/
+COPY --from=builder /usr/local/lib/libz.so.1.0.0   /usr/local/lib/
+COPY --from=builder /opt/awslc/lib/libssl.so*      /opt/awslc/lib/
+COPY --from=builder /opt/awslc/lib/libcrypto.so*   /opt/awslc/lib/
 
 RUN set -eux; \
     mkdir -p \
@@ -466,11 +453,11 @@ ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
 EXPOSE 80 443/tcp 443/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q --spider --tries=1 http://127.0.0.1/ || exit 1
+  CMD nginx -t -q || exit 1
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks 5.0 Optimized" \
+LABEL project="JBS Networks 4.9 Rust-Optimized" \
       nginx.version="${NGINX_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
       zlib-rs.version="${ZLIBRS_VERSION}" \
