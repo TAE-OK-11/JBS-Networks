@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>성장호르몬 결핍증 안내</title>
+  <style>
+    :root {
+      --bg: #f3f8ff;
+      --card: #ffffff;
+      --primary: #1e66d0;
+      --text: #1f2a37;
+      --muted: #5b6470;
+      --accent: #0ea5a4;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Pretendard", "Noto Sans KR", Arial, sans-serif;
+      color: var(--text);
+      background: linear-gradient(160deg, var(--bg), #e8f5ff);
+      line-height: 1.6;
+    }
+
+    .container {
+      width: min(1080px, 92%);
+      margin: 0 auto;
+    }
+
+    header {
+      padding: 72px 0 48px;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 6px 12px;
+      background: rgba(30, 102, 208, 0.1);
+      color: var(--primary);
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.8rem, 4vw, 3rem);
+      line-height: 1.25;
+    }
+
+    .subtitle {
+      margin: 16px auto 0;
+      max-width: 720px;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .cta-row {
+      margin-top: 24px;
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      text-decoration: none;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-weight: 700;
+      border: 2px solid transparent;
+      transition: all .2s ease;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-secondary {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: white;
+    }
+
+    .btn:hover { transform: translateY(-2px); }
+
+    main {
+      padding-bottom: 64px;
+    }
+
+    section {
+      margin-top: 20px;
+      background: var(--card);
+      border-radius: 16px;
+      padding: 26px;
+      box-shadow: 0 10px 25px rgba(31, 42, 55, 0.08);
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.35rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-top: 10px;
+    }
+
+    .card {
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 16px;
+      background: #fbfdff;
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 1.05rem;
+      color: var(--primary);
+    }
+
+    ul { padding-left: 18px; margin: 10px 0 0; }
+
+    .callout {
+      margin-top: 14px;
+      padding: 14px;
+      border-left: 5px solid var(--accent);
+      background: #ecfeff;
+      border-radius: 8px;
+      color: #0f4f52;
+      font-weight: 600;
+    }
+
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+      padding: 26px 0 40px;
+    }
+
+    @media (max-width: 640px) {
+      section { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <span class="badge">어린이 성장 건강 캠페인</span>
+      <h1>성장호르몬 결핍증,<br />조기 발견이 아이의 미래를 바꿉니다</h1>
+      <p class="subtitle">
+        또래보다 키 성장이 느리거나 성장 곡선이 급격히 떨어진다면, 단순한 체질이 아니라
+        성장호르몬 결핍증일 수 있습니다. 정확한 진단과 치료 정보를 확인해 보세요.
+      </p>
+      <div class="cta-row">
+        <a href="#symptoms" class="btn btn-primary">증상 확인하기</a>
+        <a href="#consult" class="btn btn-secondary">상담 안내</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section id="about">
+      <h2>성장호르몬 결핍증이란?</h2>
+      <p>
+        성장호르몬 결핍증은 뇌하수체에서 분비되는 성장호르몬이 부족해 키 성장과 신체 발달이
+        기대보다 늦어지는 질환입니다. 치료 시기를 놓치지 않으면 성장 잠재력을 회복하는 데
+        큰 도움이 됩니다.
+      </p>
+    </section>
+
+    <section id="symptoms">
+      <h2>이런 신호가 보이면 확인이 필요합니다</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>성장 속도 저하</h3>
+          <p>1년에 자라는 키가 또래 평균보다 현저히 적습니다.</p>
+        </article>
+        <article class="card">
+          <h3>성장 곡선 이탈</h3>
+          <p>소아청소년 성장도표에서 백분위수가 지속적으로 하락합니다.</p>
+        </article>
+        <article class="card">
+          <h3>또래 대비 작은 체격</h3>
+          <p>같은 연령대와 비교해 키 차이가 점점 벌어집니다.</p>
+        </article>
+        <article class="card">
+          <h3>사춘기 발달 지연</h3>
+          <p>2차 성징이 늦거나 전반적인 발달 속도가 느릴 수 있습니다.</p>
+        </article>
+      </div>
+      <div class="callout">※ 단순 참고용 정보이며, 정확한 진단은 전문의 진료가 필요합니다.</div>
+    </section>
+
+    <section id="diagnosis">
+      <h2>진단과 치료는 어떻게 진행되나요?</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>1. 성장 평가</h3>
+          <ul>
+            <li>키·몸무게·성장 속도 측정</li>
+            <li>성장도표 분석</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>2. 검사 시행</h3>
+          <ul>
+            <li>혈액 검사</li>
+            <li>골연령(손목 X-ray) 검사</li>
+            <li>필요 시 성장호르몬 자극 검사</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>3. 치료 계획</h3>
+          <ul>
+            <li>개인별 성장호르몬 치료</li>
+            <li>정기적인 성장 추적 관찰</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="consult">
+      <h2>상담이 필요하신가요?</h2>
+      <p>
+        아이의 최근 6~12개월 키 변화를 기록해 방문하시면 상담에 큰 도움이 됩니다.
+        아래 연락처 예시를 참고해 가까운 소아내분비 전문의와 상담해 보세요.
+      </p>
+      <ul>
+        <li>상담전화: 02-1234-5678</li>
+        <li>이메일: growthcare@example.com</li>
+        <li>운영시간: 평일 09:00 ~ 18:00</li>
+      </ul>
+      <div class="callout">아이의 성장, 지금 확인하면 더 많은 가능성을 지킬 수 있습니다.</div>
+    </section>
+  </main>
+
+  <footer>
+    본 페이지는 질환 인식 개선을 위한 홍보용 예시 사이트입니다. 의료적 판단은 반드시 전문의와 상담하세요.
+  </footer>
+</body>
+</html>
