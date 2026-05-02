@@ -254,7 +254,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM node:24.14.1-bookworm-slim@${NODE_DIGEST} AS jsbuilder
 WORKDIR /src/ui
-COPY --from=source /src/ui ./
+COPY --link --from=source /src/ui ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit --fund=false && npm run build
 
@@ -289,7 +289,7 @@ WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
-COPY --from=jsbuilder /src/ui/build ./ui/build/
+COPY --link --from=jsbuilder /src/ui/build ./ui/build/
 
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
@@ -318,9 +318,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libmp3lame0 libvorbis0a libvorbisenc2 libvorbisfile3 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
-COPY --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
+COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
+COPY --link --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
@@ -338,13 +338,12 @@ RUN chmod 755 /usr/local/bin/ffmpeg
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
-    mkdir -p /app /data /music /data/cache && \
-    touch /.nddockerenv && \
-    chown -R 1000:1000 /app /data /music
+    install -d -o 1000 -g 1000 -m 755 /app /data /music /data/cache && \
+    touch /.nddockerenv
 
-COPY --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
-COPY --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
-COPY --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
+COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
+COPY --link --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
+COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
 
 USER 1000:1000
 VOLUME ["/data", "/music"]
