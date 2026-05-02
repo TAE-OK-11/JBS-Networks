@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NAV_DOCKERFILE="$ROOT_DIR/navidrome/Dockerfile"
+NGX_DOCKERFILE="$ROOT_DIR/nginx/Dockerfile"
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "missing dependency: $1" >&2; exit 1; }; }
+need curl; need jq; need sed; need rg; need sort
+extract_arg(){ sed -n "s/^ARG $2=\"\{0,1\}\([^\" ]*\)\"\{0,1\}$/\1/p" "$1" | head -n1; }
+check_github_latest(){ local label="$1" repo="$2" current="$3"; local latest; latest="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" | jq -r '.tag_name // empty')"; [[ -z "$latest" ]] && { echo "[WARN] $label: latest release API unavailable"; return; }; [[ "$latest" == "$current" ]] && printf "[OK] %-18s current=%s latest=%s\n" "$label" "$current" "$latest" || printf "[UPDATE] %-14s current=%s latest=%s\n" "$label" "$current" "$latest"; }
+check_ffmpeg_latest(){ local current="$1" latest; latest="$(curl -fsSL https://ffmpeg.org/releases/ | rg -o 'ffmpeg-[0-9]+\.[0-9]+(\.[0-9]+)?\.tar\.bz2' | sed 's/^ffmpeg-//;s/\.tar\.bz2$//' | sort -V | tail -n1)"; [[ -z "$latest" ]] && { echo "[WARN] ffmpeg: parse failed"; return; }; [[ "$latest" == "$current" ]] && printf "[OK] %-18s current=%s latest=%s\n" "ffmpeg" "$current" "$latest" || printf "[UPDATE] %-14s current=%s latest=%s\n" "ffmpeg" "$current" "$latest"; }
+check_opus_latest(){ local current="$1" latest; latest="$(curl -fsSL https://downloads.xiph.org/releases/opus/ | rg -o 'opus-[0-9]+\.[0-9]+(\.[0-9]+)?\.tar\.gz' | sed 's/^opus-//;s/\.tar\.gz$//' | sort -V | tail -n1)"; [[ -z "$latest" ]] && { echo "[WARN] opus: parse failed"; return; }; [[ "$latest" == "$current" ]] && printf "[OK] %-18s current=%s latest=%s\n" "opus" "$current" "$latest" || printf "[UPDATE] %-14s current=%s latest=%s\n" "opus" "$current" "$latest"; }
+check_nginx_latest(){ local current="$1" stable; stable="$(curl -fsSL https://nginx.org/en/download.html | tr '\n' ' ' | sed -n 's/.*Stable version<\/h4><\/center><table width="100%"><tr><td width="20%"><a href="\/en\/CHANGES-[0-9.]*">CHANGES-[0-9.]*<\/a><\/td><td width="20%"><a href="\/download\/nginx-\([0-9.]*\)\.tar\.gz">.*/\1/p')"; [[ -z "$stable" ]] && { echo "[WARN] nginx stable version parsing failed"; return; }; [[ "$stable" == "$current" ]] && printf "[OK] %-18s current=%s latest=%s\n" "nginx(stable)" "$current" "$stable" || printf "[UPDATE] %-14s current=%s latest=%s\n" "nginx(stable)" "$current" "$stable"; }
+navidrome_ref="$(extract_arg "$NAV_DOCKERFILE" NAVIDROME_REF)"; ffmpeg_ver="$(extract_arg "$NAV_DOCKERFILE" FFMPEG_VERSION)"; opus_ver="$(extract_arg "$NAV_DOCKERFILE" OPUS_VERSION)"; nginx_ver="$(extract_arg "$NGX_DOCKERFILE" NGINX_VERSION)"; cargoc_ver="$(extract_arg "$NGX_DOCKERFILE" CARGOC_VERSION)"
+echo "== Navidrome stack =="; check_github_latest "navidrome" "navidrome/navidrome" "$navidrome_ref"; check_ffmpeg_latest "$ffmpeg_ver"; check_opus_latest "$opus_ver"
+echo; echo "== NGINX stack =="; check_nginx_latest "$nginx_ver"; check_github_latest "cargo-c" "lu-zero/cargo-c" "$cargoc_ver"; echo; echo "Done."

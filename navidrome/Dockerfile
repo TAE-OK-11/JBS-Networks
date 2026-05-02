@@ -1,13 +1,16 @@
 # syntax=docker/dockerfile:1
+# JBS Networks — Navidrome Ultra (Zen3 / Clang+ThinLTO / jemalloc / Custom-FFmpeg)
+# v5.1 — libopus 1.6.1 소스 빌드 통합판
 
 ARG NAVIDROME_REF=v0.61.2
 ARG TAGLIB_VERSION=2.2.1
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1
+ARG OPUS_VERSION=1.6.1
 ARG NAVIDROME_BUILD_CORES=2
 ARG GOMEMLIMIT=6GiB
 ARG SCANSCHEDULE=0
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -funroll-loops -falign-functions=32"
 ARG LTO_FLAGS="-flto=thin"
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
@@ -16,6 +19,7 @@ ARG RUST_TARGET_CPU=znver3
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
 ARG FFMPEG_SHA256="c07039598df7d64d3c8b42c4e25b1959fc908621c6f6c2946881133f3b27eda2"
 ARG TAGLIB_SHA256="7e76b5299dcef427c486bffe455098470c8da91cf3ccb9ea804893df57389b5e"
+ARG OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
 
 # ── 베이스 이미지 digest 고정 ────────────────────────────────────────────────
 ARG DEBIAN_TRIXIE_DIGEST="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
@@ -50,13 +54,44 @@ RUN wget -qO jemalloc.tar.bz2 \
     echo "${JEMALLOC_SHA256}  jemalloc.tar.bz2" | sha256sum -c -
 WORKDIR /build/jemalloc-${JEMALLOC_VERSION}
 RUN tar -xjf /build/jemalloc.tar.bz2 --strip-components=1 -C .
+# --disable-stats: 런타임 통계 카운터 제거 (atomic 연산 감소, 소폭 성능 증가)
+# --enable-readlinkat: /proc 의존성 대신 readlinkat(2) 사용
 RUN CC=clang CXX=clang++ \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
     LDFLAGS="${LTO_FLAGS} -fuse-ld=lld" \
-    ./configure --prefix=/usr/local --disable-cxx && \
+    ./configure --prefix=/usr/local --disable-cxx \
+        --disable-stats \
+        --enable-readlinkat && \
     make -j${NAVIDROME_BUILD_CORES} install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l \
+        -exec strip --strip-unneeded {} +
+
+FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS opus-builder
+ARG OPUS_VERSION
+ARG OPUS_SHA256
+ARG NAVIDROME_BUILD_CORES
+ARG CPU_OPTIMIZATION_FLAGS
+ARG LTO_FLAGS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential clang lld llvm pkg-config \
+        autoconf automake libtool wget ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN wget -qO opus.tar.gz \
+        "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" && \
+    echo "${OPUS_SHA256}  opus.tar.gz" | sha256sum -c -
+WORKDIR /build/opus-${OPUS_VERSION}
+RUN tar -xzf /build/opus.tar.gz --strip-components=1 -C .
+RUN CC=clang CXX=clang++ \
+    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+    LDFLAGS="${LTO_FLAGS} -fuse-ld=lld" \
+    ./configure --prefix=/usr/local \
+        --enable-shared \
+        --disable-static && \
+    make -j${NAVIDROME_BUILD_CORES} install && \
+    find /usr/local/lib -name "libopus.so.*" ! -type l \
         -exec strip --strip-unneeded {} +
 
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS ffmpeg-builder
@@ -68,21 +103,31 @@ ARG LTO_FLAGS
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang lld llvm pkg-config \
         yasm nasm wget ca-certificates \
-        libmp3lame-dev libopus-dev libvorbis-dev && \
+        libmp3lame-dev libvorbis-dev && \
     rm -rf /var/lib/apt/lists/*
+COPY --from=opus-builder /usr/local /usr/local
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 WORKDIR /build
 RUN wget -qO ffmpeg.tar.bz2 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2" && \
     echo "${FFMPEG_SHA256}  ffmpeg.tar.bz2" | sha256sum -c -
 WORKDIR /build/ffmpeg-${FFMPEG_VERSION}
 RUN tar -xjf /build/ffmpeg.tar.bz2 --strip-components=1 -C .
+# ── Zen3 고정 타겟 + 런타임 CPU 감지 제거 + 하드코딩 테이블 ───────────────────
 RUN ./configure \
         --cc=clang --cxx=clang++ \
-        --extra-cflags="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
-        --extra-ldflags="${LTO_FLAGS} -fuse-ld=lld" \
-        --disable-everything \
+        --cpu=znver3 \
+        --disable-runtime-cpudetect \
+        --enable-hardcoded-tables \
+        --disable-autodetect \
+        --disable-network \
+        --disable-debug \
+        --disable-doc \
         --disable-ffplay \
         --disable-ffprobe \
-        --disable-doc \
+        --disable-everything \
+        --extra-cflags="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+        --extra-ldflags="${LTO_FLAGS} -fuse-ld=lld -Wl,--gc-sections -Wl,--as-needed" \
+        --extra-ldexeflags="-Wl,-O1,-z,relro,-z,now" \
         --enable-avcodec \
         --enable-avformat \
         --enable-avfilter \
@@ -209,7 +254,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM node:24.14.1-bookworm-slim@${NODE_DIGEST} AS jsbuilder
 WORKDIR /src/ui
-COPY --from=source /src/ui ./
+COPY --link --from=source /src/ui ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit --fund=false && npm run build
 
@@ -226,7 +271,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config wget libutfcpp-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /taglib-build
-# [수정] 정적 링크(-fPIC) 옵션 강제 추가
 RUN wget -qO taglib.tar.gz \
         "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" && \
     echo "${TAGLIB_SHA256}  taglib.tar.gz" | sha256sum -c - && \
@@ -245,9 +289,8 @@ WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY --from=source /src ./
-COPY --from=jsbuilder /src/ui/build ./ui/build/
+COPY --link --from=jsbuilder /src/ui/build ./ui/build/
 
-# [수정] CGO_LDFLAGS에 -lz (zlib) 및 -lm 명시, go build 명령어 한 줄 병합
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
@@ -272,11 +315,12 @@ LABEL org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates zlib1g libstdc++6 tzdata \
-        libmp3lame0 libopus0 libvorbis0a libvorbisenc2 libvorbisfile3 && \
+        libmp3lame0 libvorbis0a libvorbisenc2 libvorbisfile3 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
+COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
+COPY --link --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
@@ -294,13 +338,12 @@ RUN chmod 755 /usr/local/bin/ffmpeg
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
-    mkdir -p /app /data /music /data/cache && \
-    touch /.nddockerenv && \
-    chown -R 1000:1000 /app /data /music
+    install -d -o 1000 -g 1000 -m 755 /app /data /music /data/cache && \
+    touch /.nddockerenv
 
-COPY --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
-COPY --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
-COPY --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
+COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
+COPY --link --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
+COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
 
 USER 1000:1000
 VOLUME ["/data", "/music"]
@@ -309,9 +352,16 @@ ARG NAVIDROME_BUILD_CORES
 ARG GOMEMLIMIT
 ARG SCANSCHEDULE
 
+# ── jemalloc 5.3.x 유효 옵션만 사용 ─────────────────────────────────────────
+# 제거된 잘못된 키(이것들이 "Invalid settings" 에러의 원인):
+#   - tcache_ncached_max:256           (size class 지정 필요 + 5.3.x에 없음)
+#   - experimental_tcache_gc:true      (존재하지 않음)
+#   - disable_large_size_classes:true  (존재하지 않음)
+#   - calloc_madvise_threshold:131072  (존재하지 않음)
+#   - process_madvise_max_batch:64     (존재하지 않음)
 ENV TZ=Asia/Seoul \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:20000,stats_print:false" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:10000,muzzy_decay_ms:20000,oversize_threshold:8388608,stats_print:false" \
     GOMEMLIMIT=${GOMEMLIMIT} \
     FFMPEG_THREADS=${NAVIDROME_BUILD_CORES} \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
