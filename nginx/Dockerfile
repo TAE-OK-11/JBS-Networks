@@ -23,7 +23,7 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fomit-frame-pointer -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
 
 FROM golang:1.26.2-bookworm@${GOLANG_DIGEST} AS healthcheck-builder
@@ -279,6 +279,7 @@ RUN set -eux; \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
+      --with-cpu-opt=znver3 \
       --with-pcre-jit \
       --with-threads \
       --with-file-aio \
