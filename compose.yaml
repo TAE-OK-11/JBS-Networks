@@ -1,0 +1,100 @@
+name: jbs-networks
+
+services:
+  navidrome:
+    build:
+      context: ./navidrome
+      dockerfile: Dockerfile
+      args:
+        NAVIDROME_REF: v0.61.2
+        NAVIDROME_BUILD_CORES: "2"
+        FFMPEG_THREADS: "2"
+        GOMEMLIMIT: 6GiB
+        SCANSCHEDULE: "0"
+    image: ${DOCKER_USERNAME:-jbsnetworks}/jbs-navidrome:latest
+    container_name: jbs-navidrome
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: Asia/Seoul
+      GOMEMLIMIT: 6GiB
+      FFMPEG_THREADS: "2"
+      ND_SCANNER_SCHEDULE: "0"
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_CONFIGFILE: /data/navidrome.toml
+      ND_CACHEFOLDER: /data/cache
+      ND_DBPATH: "/data/navidrome.db?cache=shared&_journal_mode=WAL&_synchronous=NORMAL&_timeout=30000&_foreign_keys=on"
+      ND_TRANSCODINGCACHESIZE: 1000MiB
+      ND_IMAGECACHESIZE: 100MiB
+      ND_COVERJPEGQUALITY: "85"
+      ND_MAXIMAGEUPLOADSIZE: 10MB
+      ND_ENABLEARTWORKPRECACHE: "true"
+      ND_ENABLETRANSCODINGCONFIG: "true"
+      ND_AUTOPLAYQUEUE: "false"
+      ND_ENABLEGRAVATAR: "false"
+      ND_DEFAULTLANGUAGE: ko
+      ND_LOGLEVEL: info
+      ND_PORT: "4533"
+    volumes:
+      - navidrome_data:/data
+      - /srv/music:/music:ro
+    expose:
+      - "4533"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - jbs_internal
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+      args:
+        NGINX_VERSION: 1.30.0
+        AWSLC_VERSION: v1.72.1
+    image: ${DOCKER_USERNAME:-jbsnetworks}/jbs-nginx:latest
+    container_name: jbs-nginx
+    restart: unless-stopped
+    init: true
+    depends_on:
+      navidrome:
+        condition: service_healthy
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    environment:
+      TZ: Asia/Seoul
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - nginx_cache:/var/cache/nginx
+    tmpfs:
+      - /run:size=32m,mode=755
+      - /tmp:size=128m,mode=1777
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 http://127.0.0.1:8080/nginx-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - jbs_internal
+
+volumes:
+  navidrome_data:
+  nginx_cache:
+
+networks:
+  jbs_internal:
+    driver: bridge
