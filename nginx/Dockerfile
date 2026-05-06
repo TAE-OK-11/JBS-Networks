@@ -1,23 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# =========================================================
-# JBS Networks NGINX 5.0 - 최적화 패스
-# 2026-04-19
-#
-# 변경점(4.9 대비):
-#  - FROM debian:trixie-slim digest 고정 (재현 가능 빌드 / 공급망 보안)
-#  - builder apt-get: golang 복원 (AWS-LC cmake가 err_data.c 등 코드 생성에 사용)
-#  - jemalloc configure: --disable-stats --enable-readlinkat 추가
-#    (atomic 감소 + /proc 의존성 제거, navidrome 빌드와 통일)
-#  - PCRE2 configure: --disable-static --disable-pcre2-16 --disable-pcre2-32
-#    (nginx는 8-bit 동적 링크만 필요, 불필요한 정적 라이브러리 빌드 제거)
-#  - nginx --with-ld-opt: -z,relro,-z,now,-z,noexecstack 추가 (RELRO + NX)
-#  - runtime apt-get: wget 추가, HEALTHCHECK를 실제 HTTP 요청으로 교체
-#    (기존 nginx -t 는 config 문법만 검사 → 프로세스 다운 미감지)
-#  - runtime COPY 명령에 --link 추가 (BuildKit 레이어 독립 캐싱)
-#  - runtime ENV DEBIAN_FRONTEND 제거 (apt-get RUN 인라인으로 이동)
-# =========================================================
 ARG DEBIAN_TRIXIE_DIGEST="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
+ARG GOLANG_DIGEST="sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34"
 
 ARG NGINX_VERSION=1.30.0
 ARG NGINX_SHA256=058188c64bf22baecaa72b809a6318a4f9ba623889c554feab03f7cb853ab31b
@@ -39,15 +23,56 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fomit-frame-pointer -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
 
-# =========================================================
-# Builder
-# =========================================================
+FROM golang:1.26.2-bookworm@${GOLANG_DIGEST} AS healthcheck-builder
+
+WORKDIR /src
+
+RUN cat > main.go <<'GO'
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"time"
+)
+
+func main() {
+	client := http.Client{
+		Timeout: 4 * time.Second,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: (&net.Dialer{
+				Timeout: 2 * time.Second,
+			}).DialContext,
+		},
+	}
+
+	resp, err := client.Get("http://127.0.0.1:8080/nginx-health")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "bad status: %s\n", resp.Status)
+		os.Exit(1)
+	}
+}
+GO
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
+    go build -trimpath -ldflags="-s -w -buildid=" -o /out/nginx-healthcheck .
+
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS builder
 
-ARG DEBIAN_TRIXIE_DIGEST
 ARG TARGETARCH
 ARG NGINX_VERSION
 ARG NGINX_SHA256
@@ -73,40 +98,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
     AR=llvm-ar \
     RANLIB=llvm-ranlib \
     NM=llvm-nm \
-    LD=ld.lld
+    LD=ld.lld \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"
 
-# 이 Dockerfile은 사실상 x86_64(znver3) 전용
 RUN case "${TARGETARCH:-amd64}" in \
-      amd64|"") echo "Building for amd64/znver3";; \
+      amd64|"") echo "Building JBS Nginx for amd64/znver3";; \
       *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/znver3 only." >&2; exit 1;; \
     esac
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    bzip2 \
-    ca-certificates \
-    cargo \
-    clang \
-    cmake \
-    curl \
-    git \
-    golang \
-    lld \
-    llvm \
-    ninja-build \
-    patchelf \
-    perl \
-    pkg-config \
-    rustc \
-    wget \
-    xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      bzip2 \
+      ca-certificates \
+      cargo \
+      clang \
+      cmake \
+      curl \
+      git \
+      golang \
+      lld \
+      llvm \
+      ninja-build \
+      patchelf \
+      perl \
+      pkg-config \
+      rustc \
+      wget \
+      xz-utils
 
 WORKDIR /tmp
 
-# ---------------------------------------------------------
-# 1) PCRE2
-# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
@@ -126,9 +149,6 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libpcre2-8.so* || true
 
-# ---------------------------------------------------------
-# 2) AWS-LC
-# ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
@@ -145,9 +165,6 @@ RUN set -eux; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true
 
-# ---------------------------------------------------------
-# 3) jemalloc
-# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -165,10 +182,9 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true
 
-# ---------------------------------------------------------
-# 4) zlib-rs  (★ 헤더 설치 경로 강건화)
-# ---------------------------------------------------------
-RUN set -eux; \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
     curl -fsSL \
@@ -176,120 +192,34 @@ RUN set -eux; \
       -o /tmp/cargo-c.tar.gz; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
-    CARGO_CBUILD="$(find /tmp/cargo-c-tmp -type f -name cargo-cbuild | head -n1)"; \
-    CARGO_CINSTALL="$(find /tmp/cargo-c-tmp -type f -name cargo-cinstall | head -n1)"; \
-    test -n "${CARGO_CBUILD}"; \
-    test -n "${CARGO_CINSTALL}"; \
-    install -Dm755 "${CARGO_CBUILD}"   /usr/local/bin/cargo-cbuild; \
-    install -Dm755 "${CARGO_CINSTALL}" /usr/local/bin/cargo-cinstall; \
-    rm -rf /tmp/cargo-c.tar.gz /tmp/cargo-c-tmp; \
+    install -Dm755 "$(find /tmp/cargo-c-tmp -type f -name cargo-cbuild | head -n1)" /usr/local/bin/cargo-cbuild; \
+    install -Dm755 "$(find /tmp/cargo-c-tmp -type f -name cargo-cinstall | head -n1)" /usr/local/bin/cargo-cinstall; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
     export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
-    \
-    echo "=== [DEBUG] /usr/local/include contents after cargo cinstall ==="; \
-    find /usr/local/include -type f -name '*.h' 2>/dev/null | sort || true; \
-    echo "=== [DEBUG] /usr/local/lib contents after cargo cinstall ==="; \
-    find /usr/local/lib -maxdepth 2 \( -name 'libz*' -o -name '*.pc' \) 2>/dev/null | sort || true; \
-    echo "=================================================================";\
-    \
-    # -------- zlib.h를 /usr/local/include/zlib.h 에 보장 --------
     if [ ! -f /usr/local/include/zlib.h ]; then \
-      for candidate in \
-        /usr/local/include/libz_rs/zlib.h \
-        /usr/local/include/libz-rs/zlib.h \
-        /usr/local/include/libz-rs-sys/zlib.h \
-        /usr/local/include/libz-rs-sys-cdylib/zlib.h \
-        /usr/local/include/zlib-rs/zlib.h \
-        /usr/local/include/z-rs/zlib.h; do \
-        if [ -f "$candidate" ]; then \
-          echo "[zlib-rs] using header from $candidate"; \
-          cp "$candidate" /usr/local/include/zlib.h; \
-          break; \
-        fi; \
-      done; \
-    fi; \
-    # 소스 트리 폴백
-    if [ ! -f /usr/local/include/zlib.h ]; then \
-      SRC_ZLIB_H="$(find /tmp/zlib-rs -type f -name 'zlib.h' | head -n1)"; \
-      echo "[zlib-rs] fallback zlib.h=${SRC_ZLIB_H}"; \
+      SRC_ZLIB_H="$(find /usr/local/include /tmp/zlib-rs -type f -name zlib.h | head -n1)"; \
       test -n "${SRC_ZLIB_H}"; \
       cp "${SRC_ZLIB_H}" /usr/local/include/zlib.h; \
     fi; \
-    # -------- zconf.h도 보장 (zlib.h가 include하는 경우 대비) --------
     if [ ! -f /usr/local/include/zconf.h ]; then \
-      for candidate in \
-        /usr/local/include/libz_rs/zconf.h \
-        /usr/local/include/libz-rs/zconf.h \
-        /usr/local/include/libz-rs-sys/zconf.h \
-        /usr/local/include/libz-rs-sys-cdylib/zconf.h \
-        /usr/local/include/zlib-rs/zconf.h \
-        /usr/local/include/z-rs/zconf.h; do \
-        if [ -f "$candidate" ]; then \
-          echo "[zlib-rs] using zconf.h from $candidate"; \
-          cp "$candidate" /usr/local/include/zconf.h; \
-          break; \
-        fi; \
-      done; \
+      SRC_ZCONF_H="$(find /usr/local/include /tmp/zlib-rs -type f -name zconf.h 2>/dev/null | head -n1 || true)"; \
+      [ -z "${SRC_ZCONF_H}" ] || cp "${SRC_ZCONF_H}" /usr/local/include/zconf.h; \
     fi; \
-    if [ ! -f /usr/local/include/zconf.h ]; then \
-      SRC_ZCONF_H="$(find /tmp/zlib-rs -type f -name 'zconf.h' 2>/dev/null | head -n1)"; \
-      if [ -n "${SRC_ZCONF_H}" ]; then \
-        echo "[zlib-rs] fallback zconf.h=${SRC_ZCONF_H}"; \
-        cp "${SRC_ZCONF_H}" /usr/local/include/zconf.h; \
-      else \
-        echo "[zlib-rs] no zconf.h found (header may be self-contained)"; \
-      fi; \
-    fi; \
-    \
-    # -------- 헤더 sanity check --------
-    test -f /usr/local/include/zlib.h; \
-    echo "=== [DEBUG] installed /usr/local/include/zlib.h ==="; \
-    ls -la /usr/local/include/zlib.h; \
-    head -n 20 /usr/local/include/zlib.h; \
-    grep -q 'z_stream'  /usr/local/include/zlib.h \
-      || { echo "ERROR: z_stream not declared in zlib.h" >&2; exit 1; }; \
-    grep -q 'Z_NO_FLUSH' /usr/local/include/zlib.h \
-      || { echo "ERROR: Z_NO_FLUSH not defined in zlib.h" >&2; exit 1; }; \
-    grep -q 'deflate'    /usr/local/include/zlib.h \
-      || { echo "ERROR: deflate not declared in zlib.h" >&2; exit 1; }; \
-    \
-    # -------- libz.so.* 심볼릭 및 soname 세팅 --------
+    grep -q 'z_stream' /usr/local/include/zlib.h; \
     cd /usr/local/lib; \
-    REAL_SO=""; \
-    if [ -f libz_rs.so ] && [ ! -L libz_rs.so ]; then \
-      REAL_SO="libz_rs.so"; \
-    elif [ -L libz_rs.so ]; then \
-      REAL_SO="$(basename "$(readlink -f libz_rs.so)")"; \
-    else \
-      REAL_SO="$(find . -maxdepth 1 -type f -name 'libz_rs.so*' -printf '%f\n' | head -n1)"; \
-    fi; \
+    REAL_SO="$(find . -maxdepth 1 -type f -name 'libz_rs.so*' -printf '%f\n' | head -n1)"; \
     test -n "${REAL_SO}"; \
-    test -f "/usr/local/lib/${REAL_SO}"; \
-    echo "[zlib-rs] real so file: ${REAL_SO}"; \
     install -Dm755 "/usr/local/lib/${REAL_SO}" /usr/local/lib/libz.so.1.0.0; \
     patchelf --set-soname libz.so.1 /usr/local/lib/libz.so.1.0.0; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
     ln -sf libz.so.1.0.0 /usr/local/lib/libz_rs.so; \
     strip --strip-debug /usr/local/lib/libz.so.1.0.0 || true; \
-    echo "[zlib-rs] final libz symlink chain:"; \
-    ls -la /usr/local/lib/libz* ; \
-    \
-    # -------- pre-flight: clang으로 실제 테스트 컴파일/링크 --------
-    printf '%s\n' \
-      '#include <sys/types.h>' \
-      '#include <unistd.h>' \
-      '#include <zlib.h>' \
-      'int main(void) { z_stream z; deflate(&z, Z_NO_FLUSH); return 0; }' \
-      > /tmp/zlib_preflight.c; \
+    printf '%s\n' '#include <zlib.h>' 'int main(void) { z_stream z; deflate(&z, Z_NO_FLUSH); return 0; }' > /tmp/zlib_preflight.c; \
     clang -I/usr/local/include -L/usr/local/lib -fuse-ld=lld \
-          -o /tmp/zlib_preflight /tmp/zlib_preflight.c -lz; \
-    echo "[zlib-rs] pre-flight OK (nginx configure should detect zlib)"
+      -o /tmp/zlib_preflight /tmp/zlib_preflight.c -lz
 
-# ---------------------------------------------------------
-# 5) zstd
-# ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "zstd-${ZSTD_VERSION}.tar.gz" \
       "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
@@ -301,20 +231,11 @@ RUN set -eux; \
     make -j"$(nproc)" install PREFIX=/usr/local; \
     strip -s /usr/local/lib/libzstd.so* || true
 
-# ---------------------------------------------------------
-# 6) Brotli + nginx zstd module
-# ---------------------------------------------------------
 RUN set -eux; \
-    git clone --filter=blob:none \
-      https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
+    git clone --filter=blob:none https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
     cd /tmp/ngx_brotli; \
-    git checkout "${NGX_BROTLI_REF}"
-
-RUN set -eux; \
-    cd /tmp/ngx_brotli; \
-    git submodule update --init --recursive --filter=blob:none
-
-RUN set -eux; \
+    git checkout "${NGX_BROTLI_REF}"; \
+    git submodule update --init --recursive --filter=blob:none; \
     cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
@@ -333,9 +254,6 @@ RUN set -eux; \
     git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
       https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module
 
-# ---------------------------------------------------------
-# 7) NGINX
-# ---------------------------------------------------------
 RUN set -eux; \
     curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
       -o "nginx-${NGINX_VERSION}.tar.gz"; \
@@ -344,14 +262,6 @@ RUN set -eux; \
     mv "nginx-${NGINX_VERSION}" /tmp/nginx; \
     cd /tmp/nginx; \
     sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config; \
-    \
-    # pre-flight: nginx configure 직전에 zlib 상태 재확인
-    echo "=== [pre-nginx] /usr/local/include/zlib.h ==="; \
-    test -f /usr/local/include/zlib.h; \
-    echo "=== [pre-nginx] /usr/local/lib/libz* ==="; \
-    ls -la /usr/local/lib/libz* ; \
-    \
-    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"; \
     ./configure \
       --prefix=/etc/nginx \
       --sbin-path=/usr/sbin/nginx \
@@ -369,6 +279,7 @@ RUN set -eux; \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
+      --with-cpu-opt=znver3 \
       --with-pcre-jit \
       --with-threads \
       --with-file-aio \
@@ -394,19 +305,13 @@ RUN set -eux; \
     make -j"$(nproc)"; \
     make install; \
     strip -s /usr/sbin/nginx; \
-    if compgen -G "/usr/lib/nginx/modules/*.so" > /dev/null; then \
-      strip -s /usr/lib/nginx/modules/*.so; \
-    fi; \
     nginx -V 2>&1 | grep -q -- '--with-http_v3_module'; \
+    nginx -V 2>&1 | grep -qi 'AWS-LC'; \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
     ! grep -q "not found" /tmp/builder_ldd.txt
 
-# =========================================================
-# Runtime
-# =========================================================
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS runtime
 
-ARG DEBIAN_TRIXIE_DIGEST
 ARG NGINX_VERSION
 ARG AWSLC_VERSION
 ARG ZLIBRS_VERSION
@@ -417,24 +322,23 @@ ARG JEMALLOC_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates
 
 RUN groupadd -r nginx && useradd -r -g nginx -s /usr/sbin/nologin nginx
 
 COPY --link --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --link --from=builder /etc/nginx /etc/nginx
-
-COPY --link --from=builder /usr/local/lib/libpcre2-8.so*  /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libpcre2-8.so* /usr/local/lib/
 COPY --link --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libzstd.so*     /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libbrotli*.so*  /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libz.so.1.0.0   /usr/local/lib/
-COPY --link --from=builder /opt/awslc/lib/libssl.so*      /opt/awslc/lib/
-COPY --link --from=builder /opt/awslc/lib/libcrypto.so*   /opt/awslc/lib/
+COPY --link --from=builder /usr/local/lib/libzstd.so* /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libbrotli*.so* /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libz.so.1.0.0 /usr/local/lib/
+COPY --link --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
+COPY --link --from=builder /opt/awslc/lib/libcrypto.so* /opt/awslc/lib/
+COPY --link --from=healthcheck-builder /out/nginx-healthcheck /usr/local/bin/nginx-healthcheck
 
 RUN set -eux; \
     mkdir -p \
@@ -456,20 +360,20 @@ RUN set -eux; \
     ldconfig; \
     ldd /usr/sbin/nginx | tee /tmp/ldd.txt; \
     ! grep -q "not found" /tmp/ldd.txt; \
-    nginx -V; \
-    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 nginx -t
+    chmod 755 /usr/local/bin/nginx-healthcheck; \
+    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 nginx -V
 
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:phycpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000"
 
 EXPOSE 80 443/tcp 443/udp
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q --spider --tries=1 http://127.0.0.1/ || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["/usr/local/bin/nginx-healthcheck"]
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks 5.0 Optimized" \
+LABEL project="JBS Networks Nginx" \
       nginx.version="${NGINX_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
       zlib-rs.version="${ZLIBRS_VERSION}" \
@@ -477,6 +381,6 @@ LABEL project="JBS Networks 5.0 Optimized" \
       zstd.version="${ZSTD_VERSION}" \
       jemalloc.version="${JEMALLOC_VERSION}" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
-      optimization="Extreme/Znver3/Full-LTO/Clang/LLD/AWS-LC/Jemalloc/zlib-rs/Brotli/Zstd"
+      optimization="Znver3/Full-LTO/Clang/LLD/AWS-LC/Jemalloc/zlib-rs/Brotli/Zstd/GoHealthcheck"
 
 CMD ["nginx", "-g", "daemon off;"]
