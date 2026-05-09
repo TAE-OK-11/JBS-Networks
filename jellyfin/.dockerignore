@@ -1,6 +1,0 @@
-.git
-.gitignore
-*.log
-tmp
-out
-node_modules
