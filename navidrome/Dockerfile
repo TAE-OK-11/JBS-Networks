@@ -1,9 +1,20 @@
 # syntax=docker/dockerfile:1.7
 
+# =========================================================
+# JBS Networks Navidrome Ultra
+# Zen3 / Go 1.26.3 / Node 24.15.0 LTS / Rust 1.95.0
+# FFmpeg 8.1.1 / TagLib 2.2.1 / jemalloc 5.3.1 / libopus 1.6.1
+# =========================================================
+
+ARG DEBIAN_IMAGE=debian:trixie-slim
+ARG NODE_IMAGE=node:24.15.0-bookworm-slim
+ARG GOLANG_IMAGE=golang:1.26.3-bookworm
+ARG RUST_IMAGE=rust:1.95.0-slim
+
 ARG NAVIDROME_REF=v0.61.2
 ARG TAGLIB_VERSION=2.2.1
 ARG JEMALLOC_VERSION=5.3.1
-ARG FFMPEG_VERSION=8.1
+ARG FFMPEG_VERSION=8.1.1
 ARG OPUS_VERSION=1.6.1
 
 ARG NAVIDROME_BUILD_CORES=2
@@ -17,22 +28,23 @@ ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
 
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
-ARG FFMPEG_SHA256="c07039598df7d64d3c8b42c4e25b1959fc908621c6f6c2946881133f3b27eda2"
+ARG FFMPEG_SHA256="b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3"
 ARG TAGLIB_SHA256="7e76b5299dcef427c486bffe455098470c8da91cf3ccb9ea804893df57389b5e"
 ARG OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
 
-ARG DEBIAN_TRIXIE_DIGEST="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
-ARG NODE_DIGEST="sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c"
-ARG GOLANG_DIGEST="sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34"
-ARG RUST_DIGEST="sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a"
+# =========================================================
+# Source
+# =========================================================
 
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS source
+FROM ${DEBIAN_IMAGE} AS source
 
 ARG NAVIDROME_REF
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+    apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      ca-certificates
 
 WORKDIR /src
 
@@ -40,7 +52,11 @@ RUN --mount=type=cache,target=/root/.cache/git \
     git clone --branch "${NAVIDROME_REF}" --depth=1 https://github.com/navidrome/navidrome.git . && \
     git rev-parse --short HEAD > /src/.git_sha
 
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS jemalloc-builder
+# =========================================================
+# jemalloc
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS jemalloc-builder
 
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
@@ -51,7 +67,16 @@ ARG LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm autoconf automake libtool bzip2 wget ca-certificates
+      build-essential \
+      clang \
+      lld \
+      llvm \
+      autoconf \
+      automake \
+      libtool \
+      bzip2 \
+      wget \
+      ca-certificates
 
 WORKDIR /build
 
@@ -74,7 +99,11 @@ RUN tar -xjf /build/jemalloc.tar.bz2 --strip-components=1 -C . && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS opus-builder
+# =========================================================
+# libopus
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS opus-builder
 
 ARG OPUS_VERSION
 ARG OPUS_SHA256
@@ -85,7 +114,16 @@ ARG LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm pkg-config autoconf automake libtool wget ca-certificates
+      build-essential \
+      clang \
+      lld \
+      llvm \
+      pkg-config \
+      autoconf \
+      automake \
+      libtool \
+      wget \
+      ca-certificates
 
 WORKDIR /build
 
@@ -106,7 +144,11 @@ RUN tar -xzf /build/opus.tar.gz --strip-components=1 -C . && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libopus.so.*" ! -type l -exec strip --strip-unneeded {} +
 
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS ffmpeg-builder
+# =========================================================
+# FFmpeg
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
 
 ARG FFMPEG_VERSION
 ARG FFMPEG_SHA256
@@ -117,21 +159,33 @@ ARG LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm pkg-config yasm nasm wget ca-certificates \
-      libmp3lame-dev libvorbis-dev
+      build-essential \
+      clang \
+      lld \
+      llvm \
+      pkg-config \
+      yasm \
+      nasm \
+      wget \
+      ca-certificates \
+      xz-utils \
+      libmp3lame-dev \
+      libvorbis-dev
 
 COPY --from=opus-builder /usr/local /usr/local
+
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
 WORKDIR /build
 
-RUN wget -qO ffmpeg.tar.bz2 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2" && \
-    echo "${FFMPEG_SHA256}  ffmpeg.tar.bz2" | sha256sum -c -
+RUN wget -qO ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" && \
+    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c -
 
 WORKDIR /build/ffmpeg-${FFMPEG_VERSION}
 
-RUN tar -xjf /build/ffmpeg.tar.bz2 --strip-components=1 -C . && \
+RUN tar -xJf /build/ffmpeg.tar.xz --strip-components=1 -C . && \
     ./configure \
       --cc=clang \
       --cxx=clang++ \
@@ -164,16 +218,24 @@ RUN tar -xjf /build/ffmpeg.tar.bz2 --strip-components=1 -C . && \
       --enable-libvorbis \
       --prefix=/usr/local && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    strip --strip-unneeded /usr/local/bin/ffmpeg
+    strip --strip-unneeded /usr/local/bin/ffmpeg && \
+    ldd /usr/local/bin/ffmpeg
 
-FROM rust:1.94.1-slim@${RUST_DIGEST} AS rust-builder
+# =========================================================
+# Rust helper binaries
+# =========================================================
+
+FROM ${RUST_IMAGE} AS rust-builder
 
 ARG NAVIDROME_BUILD_CORES
 ARG RUST_TARGET_CPU
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends musl-tools build-essential ca-certificates && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      musl-tools \
+      build-essential \
+      ca-certificates && \
     rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
@@ -266,6 +328,7 @@ fn main() {
     };
 
     let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
     let req = format!(
         "GET /ping HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
@@ -297,7 +360,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/x86_64-unknown-linux-musl/release/entrypoint /out/entrypoint && \
     cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck
 
-FROM node:24.14.1-bookworm-slim@${NODE_DIGEST} AS jsbuilder
+# =========================================================
+# UI build
+# =========================================================
+
+FROM ${NODE_IMAGE} AS jsbuilder
 
 WORKDIR /src/ui
 
@@ -307,7 +374,11 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit --fund=false && \
     npm run build
 
-FROM golang:1.26.2-bookworm@${GOLANG_DIGEST} AS gobuilder
+# =========================================================
+# Go / Navidrome build
+# =========================================================
+
+FROM ${GOLANG_IMAGE} AS gobuilder
 
 ARG TAGLIB_VERSION
 ARG TAGLIB_SHA256
@@ -320,7 +391,16 @@ ARG GOAMD64_VERSION
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      clang lld llvm make cmake zlib1g-dev ca-certificates pkg-config wget libutfcpp-dev
+      clang \
+      lld \
+      llvm \
+      make \
+      cmake \
+      zlib1g-dev \
+      ca-certificates \
+      pkg-config \
+      wget \
+      libutfcpp-dev
 
 WORKDIR /taglib-build
 
@@ -367,9 +447,15 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -buildvcs=false \
       -tags="netgo sqlite_fts5 sqlite_foreign_keys embed" \
       -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
-      -o /out/navidrome .
+      -o /out/navidrome . && \
+    file /out/navidrome && \
+    ldd /out/navidrome || true
 
-FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS release
+# =========================================================
+# Runtime
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
       optimization="Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck" \
@@ -391,10 +477,11 @@ COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 COPY --link --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
 
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
-
-RUN mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
-    cat > /usr/local/bin/ffmpeg <<'SH'
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
+    ldconfig && \
+    mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
+    cat > /usr/local/bin/ffmpeg <<'SH' && \
+    chmod 755 /usr/local/bin/ffmpeg
 #!/bin/sh
 THREADS=$(printf '%d' "${FFMPEG_THREADS:-2}" 2>/dev/null)
 if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
@@ -402,8 +489,6 @@ if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
 fi
 exec /usr/local/bin/ffmpeg.real -threads "$THREADS" "$@"
 SH
-
-RUN chmod 755 /usr/local/bin/ffmpeg
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
