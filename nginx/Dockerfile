@@ -21,7 +21,8 @@
 # 안정화 반영:
 #  - ENV 중간 주석 제거
 #  - LD=ld.lld 제거
-#  - AWS-LC CLI 존재 여부에 의존하지 않고 라이브러리/심볼 검증
+#  - AWS-LC nm 심볼 hard check 제거
+#  - AWS-LC 실제 compile/link/run smoke test 추가
 #  - zlib preflight heredoc 제거, printf 기반으로 교체
 #  - MALLOC_CONF에 abort_conf:true 추가
 #  - LD_TRACE_LOADED_OBJECTS jemalloc 체크는 soft check
@@ -166,17 +167,43 @@ RUN set -eux; \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true; \
+    \
     test -f /opt/awslc/lib/libssl.so; \
     test -f /opt/awslc/lib/libcrypto.so; \
-    nm -D /opt/awslc/lib/libssl.so | grep -q 'SSL_CTX_new'; \
-    nm -D /opt/awslc/lib/libcrypto.so | grep -q 'EVP_'; \
+    \
+    echo "=== AWS-LC library files ==="; \
+    ls -la /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so*; \
+    \
+    echo "=== AWS-LC dynamic symbols soft preview ==="; \
+    nm -D /opt/awslc/lib/libssl.so 2>/dev/null | head -n 30 || true; \
+    nm -D /opt/awslc/lib/libcrypto.so 2>/dev/null | head -n 30 || true; \
+    \
+    echo "=== AWS-LC compile/link/run smoke test ==="; \
+    printf '%s\n' \
+      '#include <openssl/ssl.h>' \
+      'int main(void) {' \
+      '    const SSL_METHOD *method = TLS_method();' \
+      '    SSL_CTX *ctx = SSL_CTX_new(method);' \
+      '    if (ctx == 0) return 1;' \
+      '    SSL_CTX_free(ctx);' \
+      '    return 0;' \
+      '}' \
+      > /tmp/awslc_preflight.c; \
+    clang -I/opt/awslc/include -L/opt/awslc/lib -fuse-ld=lld \
+      -Wl,-rpath,/opt/awslc/lib \
+      -o /tmp/awslc_preflight /tmp/awslc_preflight.c \
+      -lssl -lcrypto; \
+    LD_LIBRARY_PATH=/opt/awslc/lib /tmp/awslc_preflight; \
+    \
+    echo "=== AWS-LC CLI optional check ==="; \
     if [ -x /opt/awslc/bin/openssl ]; then \
-      /opt/awslc/bin/openssl version; \
+      LD_LIBRARY_PATH=/opt/awslc/lib /opt/awslc/bin/openssl version || true; \
     elif [ -x /opt/awslc/bin/bssl ]; then \
-      /opt/awslc/bin/bssl version || true; \
+      LD_LIBRARY_PATH=/opt/awslc/lib /opt/awslc/bin/bssl version || true; \
     else \
-      echo "[AWS-LC] CLI binary not installed; library and symbol checks passed"; \
-    fi
+      echo "[AWS-LC] CLI binary not found; compile/link smoke test passed"; \
+    fi; \
+    echo "[OK] AWS-LC build and link check passed"
 
 # ---------------------------------------------------------
 # 3) jemalloc 5.3.1
@@ -498,8 +525,13 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    groupadd --system --gid 101 nginx; \
-    useradd --system --uid 101 --gid nginx --no-log-init --shell /usr/sbin/nologin nginx
+    if ! getent group nginx >/dev/null; then \
+      groupadd --system --gid 101 nginx || groupadd --system nginx; \
+    fi; \
+    if ! id -u nginx >/dev/null 2>&1; then \
+      useradd --system --uid 101 --gid nginx --no-log-init --shell /usr/sbin/nologin nginx \
+      || useradd --system --gid nginx --no-log-init --shell /usr/sbin/nologin nginx; \
+    fi
 
 COPY --link --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --link --from=builder /etc/nginx /etc/nginx
