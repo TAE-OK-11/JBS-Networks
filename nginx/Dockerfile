@@ -2,7 +2,7 @@
 
 # =========================================================
 # JBS Networks NGINX 5.1 - Latest Dependency Refresh / Relaxed Safe Checks
-# 기준일: 2026-05-09
+# 기준일: 2026-05-14
 #
 # 핵심 방향:
 #  - rootless Docker 아님
@@ -12,7 +12,7 @@
 #  - USER nginx 미사용: 80/443 바인딩, QUIC, jemalloc 안정성 우선
 #
 # 주요 버전:
-#  - NGINX 1.30.0
+#  - NGINX 1.30.1
 #  - AWS-LC v1.73.0
 #  - PCRE2 10.47
 #  - jemalloc 5.3.1
@@ -23,8 +23,8 @@
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
 
-ARG NGINX_VERSION=1.30.0
-ARG NGINX_SHA256=058188c64bf22baecaa72b809a6318a4f9ba623889c554feab03f7cb853ab31b
+ARG NGINX_VERSION=1.30.1
+ARG NGINX_SHA256=99765000d974896b31ca5882d8c279ce3fe7ef6f5c6f9f0a967ed7fd3407f9cc
 
 ARG PCRE2_VERSION=10.47
 ARG PCRE2_SHA256=c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16
@@ -389,7 +389,7 @@ RUN set -eux; \
     grep -n "zstd" /tmp/ngx_http_zstd_module/config || true
 
 # ---------------------------------------------------------
-# 9) NGINX 1.30.0
+# 9) NGINX 1.30.1
 # ---------------------------------------------------------
 RUN set -eux; \
     curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
