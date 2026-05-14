@@ -3,8 +3,9 @@
 # =========================================================
 # JBS Networks Navidrome Ultra
 # Zen3 / Go 1.26.3 / Node 24.15.0 LTS / Rust 1.95.0
-# FFmpeg 8.1.1 / TagLib 2.2.1 / jemalloc 5.3.1 / libopus 1.6.1
+# FFmpeg 8.1.1 / TagLib 2.3 / jemalloc 5.3.1 / libopus 1.6.1
 # =========================================================
+# 기준일: 2026-05-14
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
 ARG NODE_IMAGE=node:24.15.0-bookworm-slim
@@ -12,7 +13,7 @@ ARG GOLANG_IMAGE=golang:1.26.3-bookworm
 ARG RUST_IMAGE=rust:1.95.0-slim
 
 ARG NAVIDROME_REF=v0.61.2
-ARG TAGLIB_VERSION=2.2.1
+ARG TAGLIB_VERSION=2.3
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.1
 ARG OPUS_VERSION=1.6.1
@@ -29,7 +30,7 @@ ARG RUST_TARGET_CPU=znver3
 
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
 ARG FFMPEG_SHA256="b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3"
-ARG TAGLIB_SHA256="7e76b5299dcef427c486bffe455098470c8da91cf3ccb9ea804893df57389b5e"
+ARG TAGLIB_SHA256="7349f6fd942418bc7009ebe743eb7c9d055f02921ec56fa436ec25007c47fd38"
 ARG OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
 
 # =========================================================
