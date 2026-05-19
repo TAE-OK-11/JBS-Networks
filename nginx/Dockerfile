@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.1 - Latest Dependency Refresh / Relaxed Safe Checks
-# 기준일: 2026-05-14
+# JBS Networks NGINX 5.1 - NGINX 1.31.0 Mainline / Network-Optimized Build
+# 기준일: 2026-05-20
 #
 # 핵심 방향:
 #  - rootless Docker 아님
@@ -12,19 +12,28 @@
 #  - USER nginx 미사용: 80/443 바인딩, QUIC, jemalloc 안정성 우선
 #
 # 주요 버전:
-#  - NGINX 1.30.1
+#  - NGINX 1.31.0 Mainline
 #  - AWS-LC v1.73.0
 #  - PCRE2 10.47
 #  - jemalloc 5.3.1
 #  - zlib-rs 0.6.3
 #  - cargo-c 0.10.22
 #  - zstd 1.5.7
+#
+# Dockerfile-only 성능 개선:
+#  - Znver3 전용 최적화
+#  - Clang / LLD / Full LTO
+#  - AWS-LC IPO/LTO 강화
+#  - zlib-rs fat LTO 강화
+#  - Brotli IPO/LTO 강화
+#  - fno-plt / omit-frame-pointer
+#  - reverse proxy 기준 불필요 HTTP 모듈 제거
 # =========================================================
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
 
-ARG NGINX_VERSION=1.30.1
-ARG NGINX_SHA256=99765000d974896b31ca5882d8c279ce3fe7ef6f5c6f9f0a967ed7fd3407f9cc
+ARG NGINX_VERSION=1.31.0
+ARG NGINX_SHA256=6d5b00d45393af2e4e7c52a442d2a198f0ccbc7678ed062a46f403edd833ebaa
 
 ARG PCRE2_VERSION=10.47
 ARG PCRE2_SHA256=c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16
@@ -43,7 +52,7 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -DNDEBUG"
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -DNDEBUG"
 ARG LTO_FLAGS="-flto=full"
 
 # =========================================================
@@ -70,9 +79,6 @@ ARG LTO_FLAGS
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# LD=ld.lld는 의도적으로 지정하지 않음.
-# autoconf/make 일부가 clang driver 없이 raw ld.lld를 직접 호출하면 LTO 링크가 깨질 수 있음.
-# 링커 선택은 LDFLAGS / CMAKE_*_LINKER_FLAGS의 -fuse-ld=lld로만 처리.
 ENV DEBIAN_FRONTEND=noninteractive \
     CC=clang \
     CXX=clang++ \
@@ -152,8 +158,12 @@ RUN set -eux; \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
+      -DCMAKE_ASM_COMPILER=clang \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     ninja -C /tmp/aws-lc/build install; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true; \
@@ -244,7 +254,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"; \
+    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C lto=fat -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,--gc-sections"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
     \
     echo "=== zlib-rs installed headers ==="; \
@@ -371,8 +381,11 @@ RUN set -eux; \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
     cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
     cmake --install /tmp/ngx_brotli/deps/brotli/out; \
@@ -389,7 +402,7 @@ RUN set -eux; \
     grep -n "zstd" /tmp/ngx_http_zstd_module/config || true
 
 # ---------------------------------------------------------
-# 9) NGINX 1.30.1
+# 9) NGINX 1.31.0
 # ---------------------------------------------------------
 RUN set -eux; \
     curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
@@ -452,6 +465,16 @@ RUN set -eux; \
       --with-stream_ssl_module \
       --with-stream_realip_module \
       --with-stream_ssl_preread_module \
+      --without-http_fastcgi_module \
+      --without-http_uwsgi_module \
+      --without-http_scgi_module \
+      --without-http_grpc_module \
+      --without-http_memcached_module \
+      --without-http_ssi_module \
+      --without-http_userid_module \
+      --without-http_autoindex_module \
+      --without-http_empty_gif_module \
+      --without-http_browser_module \
       --add-module=/tmp/ngx_brotli \
       --add-module=/tmp/ngx_http_zstd_module \
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
@@ -532,7 +555,7 @@ COPY --link --from=builder /opt/awslc/lib/libssl.so*        /opt/awslc/lib/
 COPY --link --from=builder /opt/awslc/lib/libcrypto.so*     /opt/awslc/lib/
 
 ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
-    MALLOC_CONF="abort_conf:true,background_thread:true,metadata_thp:auto,percpu_arena:phycpu,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000" \
+    MALLOC_CONF="abort_conf:true,background_thread:true,metadata_thp:auto,percpu_arena:phycpu,tcache:true,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000" \
     NGINX_ENTRYPOINT_QUIET_LOGS=1
 
 RUN set -eux; \
@@ -587,7 +610,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks NGINX 5.1 Latest Stable" \
+LABEL project="JBS Networks NGINX 5.1 Latest Mainline" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
@@ -598,6 +621,6 @@ LABEL project="JBS Networks NGINX 5.1 Latest Stable" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
       runtime.mode="rootful-container-root-master-nginx-workers" \
-      optimization="Znver3/Clang/LLD/Full-LTO/AWS-LC/Jemalloc/zlib-rs/Brotli/Zstd/HTTP3"
+      optimization="Znver3/Clang/LLD/Full-LTO/AWS-LC-IPO/Jemalloc/zlib-rs-fat-LTO/Brotli-IPO/Zstd/HTTP3/ReverseProxy-Trimmed"
 
 CMD ["nginx", "-g", "daemon off;"]
