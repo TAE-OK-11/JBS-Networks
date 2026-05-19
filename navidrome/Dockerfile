@@ -1,11 +1,21 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra
+# JBS Networks Navidrome Ultra - Final
 # Zen3 / Go 1.26.3 / Node 24.15.0 LTS / Rust 1.95.0
 # FFmpeg 8.1.1 / TagLib 2.3 / jemalloc 5.3.1 / libopus 1.6.1
+#
+# SQLite Ultra:
+#   WAL / STAT4 / mmap / stmt-cache / no shared-cache
+#
+# Streaming Ultra:
+#   separated /cache / FFmpeg wrapper / transcoding cancellation
+#   cache-heavy streaming / scanner load reduction / FTS search
+#
+# External integrations:
+#   Last.fm / Deezer / ListenBrainz enabled
 # =========================================================
-# 기준일: 2026-05-14
+# 기준일: 2026-05-19
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
 ARG NODE_IMAGE=node:24.15.0-bookworm-slim
@@ -21,12 +31,23 @@ ARG OPUS_VERSION=1.6.1
 ARG NAVIDROME_BUILD_CORES=2
 ARG FFMPEG_THREADS=2
 ARG GOMEMLIMIT=6GiB
+ARG GOMAXPROCS=4
+ARG GOGC=125
 ARG SCANSCHEDULE=0
 
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG LTO_FLAGS="-flto=thin"
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
+
+# SQLite DB 강화:
+# - shared-cache 제거
+# - WAL checkpoint 빈도 완화
+# - temp 작업 메모리 우선
+# - mmap read 기본값/상한 설정
+# - SQLite 내부 memstatus 오버헤드 감소
+# - LIKE/BLOB 불필요 매칭 방지
+ARG SQLITE_EXTRA_CFLAGS="-DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=8192 -DSQLITE_TEMP_STORE=2 -DSQLITE_DEFAULT_MMAP_SIZE=268435456 -DSQLITE_MAX_MMAP_SIZE=1073741824 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS"
 
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
 ARG FFMPEG_SHA256="b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3"
@@ -210,8 +231,9 @@ RUN tar -xJf /build/ffmpeg.tar.xz --strip-components=1 -C . && \
       --enable-protocol=file,pipe \
       --enable-demuxer=mp3,aac,flac,ogg,wav,aiff,mov,matroska,opus,ape,wv,dsf,caf \
       --enable-decoder=mp3,mp3float,aac,aac_fixed,flac,vorbis,opus,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,wavpack,ape,dsd_lsbf_planar,dsd_msbf_planar \
+      --enable-parser=aac,flac,mpegaudio,opus,vorbis \
       --enable-encoder=libmp3lame,libopus,libvorbis,flac,aac,pcm_s16le \
-      --enable-muxer=mp3,flac,ogg,wav,opus,adts \
+      --enable-muxer=mp3,flac,ogg,wav,opus,adts,mp4,ipod \
       --enable-filter=anull,aresample,volume,atrim,afade,aformat \
       --enable-bsf=aac_adtstoasc \
       --enable-libmp3lame \
@@ -224,6 +246,8 @@ RUN tar -xJf /build/ffmpeg.tar.xz --strip-components=1 -C . && \
 
 # =========================================================
 # Rust helper binaries
+# - entrypoint: SQLite startup maintenance / PRAGMA optimize / WAL checkpoint
+# - healthcheck: /ping HTTP check without curl/wget
 # =========================================================
 
 FROM ${RUST_IMAGE} AS rust-builder
@@ -236,6 +260,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       musl-tools \
       build-essential \
+      pkg-config \
       ca-certificates && \
     rustup target add x86_64-unknown-linux-musl
 
@@ -263,7 +288,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 TOML
 
 RUN cat > entrypoint/src/main.rs <<'RUST_SRC'
@@ -271,27 +296,65 @@ use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
-fn wal_checkpoint() {
+use rusqlite::{Connection, OpenFlags};
+
+fn db_file_from_nd_dbpath(value: &str) -> Option<String> {
+    let mut v = value.trim();
+
+    if let Some(stripped) = v.strip_prefix("file:") {
+        v = stripped;
+    }
+
+    let file = v.split('?').next().unwrap_or("").trim();
+
+    if file.is_empty() {
+        return None;
+    }
+
+    Some(file.to_string())
+}
+
+fn sqlite_startup_maintenance() {
     let db_path = match env::var("ND_DBPATH") {
         Ok(v) => v,
         Err(_) => return,
     };
 
-    let file = db_path.split('?').next().unwrap_or("").trim();
-    if file.is_empty() || !Path::new(file).exists() {
+    let file = match db_file_from_nd_dbpath(&db_path) {
+        Some(v) => v,
+        None => return,
+    };
+
+    if !Path::new(&file).exists() {
         return;
     }
 
-    if let Ok(conn) = rusqlite::Connection::open(file) {
-        let _ = conn.execute_batch(
-            "PRAGMA wal_autocheckpoint=4000; PRAGMA wal_checkpoint(PASSIVE);",
-        );
-    }
+    let uri = format!("file:{}?mode=rw", file);
+
+    let conn = match Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let _ = conn.busy_timeout(Duration::from_secs(60));
+
+    let _ = conn.execute_batch(
+        "
+        PRAGMA analysis_limit=1000;
+        PRAGMA optimize=0x10002;
+        PRAGMA wal_checkpoint(PASSIVE);
+        PRAGMA shrink_memory;
+        ",
+    );
 }
 
 fn main() {
-    wal_checkpoint();
+    sqlite_startup_maintenance();
 
     let args: Vec<String> = env::args().skip(1).collect();
     let err = Command::new("/app/navidrome").args(&args).exec();
@@ -388,6 +451,7 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG LTO_FLAGS
 ARG GOAMD64_VERSION
+ARG SQLITE_EXTRA_CFLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -436,7 +500,7 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
-    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS}" \
+    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
     CGO_LDFLAGS="${LTO_FLAGS} -fuse-ld=lld -L/usr/local/lib -lstdc++ -lz -lm -Wl,--gc-sections -Wl,--as-needed"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
@@ -446,7 +510,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     GOOS=linux GOARCH=amd64 go build -p "${NAVIDROME_BUILD_CORES}" \
       -trimpath \
       -buildvcs=false \
-      -tags="netgo sqlite_fts5 sqlite_foreign_keys embed" \
+      -tags="netgo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_omit_load_extension embed" \
       -ldflags="-s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
       -o /out/navidrome . && \
     file /out/navidrome && \
@@ -459,7 +523,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck" \
+      optimization="Zen3/Clang/ThinLTO/Jemalloc/Custom-FFmpeg/RustEntrypoint/RustHealthcheck/SQLite-Ultra/Streaming-Ultra/ExternalAgents-On" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -472,12 +536,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       libmp3lame0 \
       libvorbis0a \
       libvorbisenc2 \
-      libvorbisfile3
+      libvorbisfile3 && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 COPY --link --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
 
+# FFmpeg streaming wrapper:
+# - stdin 대기 방지
+# - 배너/통계/불필요 로그 감소
+# - ffmpeg/filter thread 제한
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
     ldconfig && \
     mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real && \
@@ -488,12 +557,20 @@ THREADS=$(printf '%d' "${FFMPEG_THREADS:-2}" 2>/dev/null)
 if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
     THREADS=2
 fi
-exec /usr/local/bin/ffmpeg.real -threads "$THREADS" "$@"
+
+exec /usr/local/bin/ffmpeg.real \
+    -nostdin \
+    -hide_banner \
+    -nostats \
+    -loglevel warning \
+    -threads "$THREADS" \
+    -filter_threads "$THREADS" \
+    "$@"
 SH
 
 RUN groupadd -g 1000 navidrome && \
     useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
-    install -d -o 1000 -g 1000 -m 755 /app /data /music /data/cache && \
+    install -d -o 1000 -g 1000 -m 755 /app /data /music /cache /cache/tmp && \
     touch /.nddockerenv
 
 COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
@@ -502,34 +579,91 @@ COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/heal
 
 USER 1000:1000
 
-VOLUME ["/data", "/music"]
+VOLUME ["/data", "/music", "/cache"]
 
 ARG GOMEMLIMIT
+ARG GOMAXPROCS
+ARG GOGC
 ARG SCANSCHEDULE
 ARG FFMPEG_THREADS
 
 ENV TZ=Asia/Seoul \
+    TMPDIR=/cache/tmp \
     LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:10000,muzzy_decay_ms:20000,oversize_threshold:8388608,stats_print:false" \
+    GOMAXPROCS=${GOMAXPROCS} \
+    GOGC=${GOGC} \
     GOMEMLIMIT=${GOMEMLIMIT} \
+    GODEBUG=netdns=go \
     FFMPEG_THREADS=${FFMPEG_THREADS} \
-    ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
+    ND_ADDRESS=0.0.0.0 \
+    ND_PORT=4533 \
+    ND_FFMPEGPATH=/usr/local/bin/ffmpeg \
     ND_MUSICFOLDER=/music \
     ND_DATAFOLDER=/data \
+    ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_CACHEFOLDER=/data/cache \
-    ND_DBPATH="/data/navidrome.db?cache=shared&_journal_mode=WAL&_synchronous=NORMAL&_timeout=30000&_foreign_keys=on" \
-    ND_TRANSCODINGCACHESIZE=1000MiB \
-    ND_IMAGECACHESIZE=100MiB \
-    ND_COVERJPEGQUALITY=85 \
-    ND_MAXIMAGEUPLOADSIZE=10MB \
-    ND_ENABLEARTWORKPRECACHE=true \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&_journal_mode=WAL&_synchronous=NORMAL&_locking=NORMAL&_busy_timeout=60000&_foreign_keys=on&_cache_size=-131072&_stmt_cache_size=256&_secure_delete=OFF" \
+    ND_SCANNER_ENABLED=true \
+    ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
+    ND_SCANNER_SCANONSTARTUP=false \
+    ND_SCANNER_WATCHERWAIT=0s \
+    ND_SCANNER_PURGEMISSING=never \
+    ND_SCANNER_FOLLOWSYMLINKS=true \
+    ND_SEARCH_BACKEND=fts \
+    ND_SEARCH_FULLSTRING=false \
+    ND_UISEARCHDEBOUNCEMS=350 \
+    ND_SMARTPLAYLISTREFRESHDELAY=30s \
+    ND_MAXSIDEBARPLAYLISTS=50 \
+    ND_ENABLEDOWNLOADS=true \
+    ND_ENABLETRANSCODINGCANCELLATION=true \
     ND_ENABLETRANSCODINGCONFIG=true \
-    ND_AUTOPLAYQUEUE=false \
+    ND_AUTOTRANSCODEDOWNLOAD=false \
+    ND_DEFAULTDOWNSAMPLINGFORMAT=opus \
+    ND_TRANSCODINGCACHESIZE=4096MiB \
+    ND_IMAGECACHESIZE=512MiB \
+    ND_COVERARTQUALITY=80 \
+    ND_ENABLEWEBPENCODING=false \
+    ND_COVERARTPRIORITY="cover.*,folder.*,front.*,embedded,external" \
+    ND_ARTISTARTPRIORITY="artist.*,album/artist.*,external" \
+    ND_DISCARTPRIORITY="disc*.*,cd*.*,cover.*,folder.*,front.*,discsubtitle,embedded" \
+    ND_LYRICSPRIORITY=".lrc,.txt,embedded" \
+    ND_ENABLEMEDIAFILECOVERART=true \
+    ND_ENABLEARTWORKPRECACHE=false \
+    ND_ENABLEARTWORKUPLOAD=true \
+    ND_ENABLECOVERANIMATION=false \
+    ND_ENABLEREPLAYGAIN=true \
+    ND_ENABLENOWPLAYING=true \
+    ND_ENABLEFAVOURITES=true \
+    ND_ENABLESTARRATING=true \
+    ND_AUTOIMPORTPLAYLISTS=false \
+    ND_PLAYLISTSPATH="" \
+    ND_ENABLEEXTERNALSERVICES=true \
+    ND_ENABLEINSIGHTSCOLLECTOR=false \
+    ND_AGENTS="deezer,lastfm,listenbrainz" \
+    ND_DEEZER_ENABLED=true \
+    ND_DEEZER_LANGUAGE="ko,en" \
+    ND_LASTFM_ENABLED=true \
+    ND_LASTFM_APIKEY="" \
+    ND_LASTFM_SECRET="" \
+    ND_LASTFM_LANGUAGE="ko,en" \
+    ND_LASTFM_SCROBBLEFIRSTARTISTONLY=false \
+    ND_LISTENBRAINZ_ENABLED=true \
+    ND_LISTENBRAINZ_BASEURL=https://api.listenbrainz.org/1/ \
+    ND_ENABLESCROBBLEHISTORY=true \
+    ND_PROMETHEUS_ENABLED=false \
+    ND_INSPECT_ENABLED=false \
+    ND_PLUGINS_ENABLED=true \
+    ND_PLUGINS_CACHESIZE=200MB \
+    ND_PLUGINS_AUTORELOAD=false \
+    ND_JUKEBOX_ENABLED=false \
     ND_ENABLEGRAVATAR=false \
+    ND_ENABLELOGREDACTING=true \
+    ND_ENABLESHARING=false \
     ND_DEFAULTLANGUAGE=ko \
-    ND_LOGLEVEL=info \
-    ND_PORT=4533
+    ND_DEFAULTTHEME=Dark \
+    ND_LOGLEVEL=warn \
+    ND_MAXIMAGEUPLOADSIZE=10MB
 
 EXPOSE 4533
 
