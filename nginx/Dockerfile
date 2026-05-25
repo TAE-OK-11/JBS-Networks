@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.1 - NGINX 1.31.0 Mainline / Network-Optimized Build
-# 기준일: 2026-05-20
+# JBS Networks NGINX 5.1 - NGINX 1.31.1 Mainline / Network-Optimized Build
+# 기준일: 2026-05-25
 #
 # 핵심 방향:
 #  - rootless Docker 아님
@@ -12,7 +12,7 @@
 #  - USER nginx 미사용: 80/443 바인딩, QUIC, jemalloc 안정성 우선
 #
 # 주요 버전:
-#  - NGINX 1.31.0 Mainline
+#  - NGINX 1.31.1 Mainline
 #  - AWS-LC v1.73.0
 #  - PCRE2 10.47
 #  - jemalloc 5.3.1
@@ -32,8 +32,8 @@
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
 
-ARG NGINX_VERSION=1.31.0
-ARG NGINX_SHA256=6d5b00d45393af2e4e7c52a442d2a198f0ccbc7678ed062a46f403edd833ebaa
+ARG NGINX_VERSION=1.31.1
+ARG NGINX_SHA256=9fcaaeb8f22544b09a19a761f3412c4112215422401634bebdd1296a403cc4bc
 
 ARG PCRE2_VERSION=10.47
 ARG PCRE2_SHA256=c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16
@@ -402,7 +402,7 @@ RUN set -eux; \
     grep -n "zstd" /tmp/ngx_http_zstd_module/config || true
 
 # ---------------------------------------------------------
-# 9) NGINX 1.31.0
+# 9) NGINX 1.31.1
 # ---------------------------------------------------------
 RUN set -eux; \
     curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
