@@ -11,13 +11,12 @@
 #   TagLib 2.3 / jemalloc 5.3.1
 #
 # Stability Fixed:
-#   - Rust helper binaries built for glibc, not musl
+#   - Rust helper binaries remain musl for GitHub Actions build stability
 #   - Fixed LD_PRELOAD jemalloc + musl helper __register_atfork crash
 #   - LD_PRELOAD removed from global ENV
 #   - jemalloc applied only to Navidrome process after runtime preload test
 #   - jemalloc failure falls back to system allocator
 #   - helper/preflight/healthcheck run without forced jemalloc
-#   - release stage includes binary/ldd/preflight checks
 #   - POSIX sh entrypoint
 # =========================================================
 
@@ -365,7 +364,7 @@ RUN ./configure \
 
 # =========================================================
 # Rust helper binaries
-# glibc build: compatible with Debian runtime + jemalloc
+# Keep musl target for GitHub Actions build compatibility
 # =========================================================
 
 FROM ${RUST_IMAGE} AS rust-builder
@@ -376,9 +375,11 @@ ARG RUST_TARGET_CPU
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
+      musl-tools \
       build-essential \
       pkg-config \
-      ca-certificates
+      ca-certificates && \
+    rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
 
@@ -794,13 +795,15 @@ RUST
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    CC_x86_64_unknown_linux_musl=musl-gcc \
     RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1" \
-    cargo build --release -j"${NAVIDROME_BUILD_CORES}" && \
+    cargo build --release --target x86_64-unknown-linux-musl -j"${NAVIDROME_BUILD_CORES}" && \
     mkdir -p /out && \
-    cp target/release/healthcheck /out/healthcheck && \
-    cp target/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
-    cp target/release/jbs-cache-warm /out/jbs-cache-warm && \
-    cp target/release/jbs-ffmpeg-preflight /out/jbs-ffmpeg-preflight
+    cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck && \
+    cp target/x86_64-unknown-linux-musl/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
+    cp target/x86_64-unknown-linux-musl/release/jbs-cache-warm /out/jbs-cache-warm && \
+    cp target/x86_64-unknown-linux-musl/release/jbs-ffmpeg-preflight /out/jbs-ffmpeg-preflight
 
 # =========================================================
 # UI build
@@ -908,7 +911,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-SafeFallback/RustHelpers-glibc/WebP-Artwork/Shell-Entrypoint" \
+      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-SafeFallback/RustHelpers-musl/WebP-Artwork/Shell-Entrypoint" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -919,7 +922,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       libstdc++6 \
       libgcc-s1 \
       tzdata \
-      grep && \
+      grep \
+      musl \
+      file && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
@@ -979,13 +984,16 @@ RUN test -s /app/navidrome && \
           /usr/local/bin/jbs-cache-warm \
           /usr/local/bin/jbs-ffmpeg-preflight
 
-RUN ldd /app/navidrome && \
+RUN file /app/navidrome && \
+    file /usr/local/bin/ffmpeg.real && \
+    file /usr/local/bin/ffprobe && \
+    file /usr/local/bin/healthcheck && \
+    file /usr/local/bin/jbs-sqlite-maint && \
+    file /usr/local/bin/jbs-cache-warm && \
+    file /usr/local/bin/jbs-ffmpeg-preflight && \
+    ldd /app/navidrome && \
     ldd /usr/local/bin/ffmpeg.real && \
     ldd /usr/local/bin/ffprobe && \
-    ldd /usr/local/bin/healthcheck && \
-    ldd /usr/local/bin/jbs-sqlite-maint && \
-    ldd /usr/local/bin/jbs-cache-warm && \
-    ldd /usr/local/bin/jbs-ffmpeg-preflight && \
     /usr/local/bin/ffprobe -hide_banner -version >/dev/null && \
     /usr/local/bin/jbs-ffmpeg-preflight --strict && \
     /usr/local/bin/jbs-sqlite-maint startup && \
