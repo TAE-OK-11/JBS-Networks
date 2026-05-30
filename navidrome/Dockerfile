@@ -26,6 +26,11 @@
 #   - Opus/LAME autotools builds force lld via CC/CXX
 #   - Opus/LAME autotools builds do not pass lld-only --lto-O3
 #   - LAME 3.100 ld.lld version-script issue fixed with --undefined-version
+#   - LAME pkg-config file generated manually for FFmpeg configure
+#   - FFmpeg opus demuxer removed; Ogg demuxer handles Ogg Opus
+#   - FFmpeg configure uses explicit include/lib/rpath-link paths
+#   - FFmpeg configure uses cross-compile mode to avoid running znver3 test binaries on non-Zen3 GitHub runners
+#   - FFmpeg --lto-O3 removed to avoid linker/toolchain mismatch
 #
 # Policy:
 #   - AMD EPYC Zen3 only
@@ -64,7 +69,6 @@ ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
 ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
-ARG LLD_LTO_FLAGS="-Wl,--lto-O3"
 
 ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_ENABLE_FTS5 \
@@ -145,10 +149,15 @@ RUN wget --https-only --max-redirect=3 -qO jemalloc.tar.bz2 \
 
 WORKDIR /build/jemalloc
 
-RUN CC=clang CXX=clang++ \
+RUN CC="clang -fuse-ld=lld" \
+    CXX="clang++ -fuse-ld=lld" \
+    AR=llvm-ar \
+    RANLIB=llvm-ranlib \
+    NM=llvm-nm \
+    STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
+    LDFLAGS="${THIN_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
@@ -263,6 +272,20 @@ RUN CC="clang -fuse-ld=lld" \
       --disable-static \
       --disable-frontend && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    printf '%s\n' \
+      'prefix=/usr/local' \
+      'exec_prefix=${prefix}' \
+      'libdir=${exec_prefix}/lib' \
+      'includedir=${prefix}/include' \
+      '' \
+      'Name: libmp3lame' \
+      'Description: LAME MP3 encoder library' \
+      "Version: ${LAME_VERSION}" \
+      'Libs: -L${libdir} -lmp3lame -lm' \
+      'Cflags: -I${includedir}' \
+      > /usr/local/lib/pkgconfig/libmp3lame.pc && \
+    pkg-config --modversion libmp3lame && \
     find /usr/local/lib -name "libmp3lame.so.*" ! -type l -exec strip --strip-unneeded {} +
 
 # =========================================================
@@ -278,7 +301,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
 ARG LLD_FLAGS
-ARG LLD_LTO_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -299,12 +321,19 @@ COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconf
 COPY --from=opus-builder /usr/local/include/opus /usr/local/include/opus
 
 COPY --from=lame-builder /usr/local/lib/libmp3lame.so* /usr/local/lib/
+COPY --from=lame-builder /usr/local/lib/pkgconfig/libmp3lame.pc /usr/local/lib/pkgconfig/
 COPY --from=lame-builder /usr/local/include/lame /usr/local/include/lame
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
-    ldconfig
+    ldconfig && \
+    pkg-config --modversion opus && \
+    pkg-config --modversion libmp3lame && \
+    pkg-config --libs libmp3lame && \
+    test -f /usr/local/include/lame/lame.h && \
+    test -e /usr/local/lib/libmp3lame.so
 
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig \
+    LD_LIBRARY_PATH=/usr/local/lib
 
 WORKDIR /build
 
@@ -320,6 +349,11 @@ WORKDIR /build/ffmpeg
 RUN ./configure \
       --cc=clang \
       --cxx=clang++ \
+      --pkg-config=pkg-config \
+      --target-os=linux \
+      --arch=x86_64 \
+      --cpu=znver3 \
+      --enable-cross-compile \
       --disable-runtime-cpudetect \
       --enable-hardcoded-tables \
       --disable-autodetect \
@@ -329,15 +363,15 @@ RUN ./configure \
       --disable-ffplay \
       --enable-ffprobe \
       --disable-everything \
-      --extra-cflags="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-      --extra-ldflags="${FULL_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" \
+      --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
+      --extra-ldflags="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
       --extra-ldexeflags="-Wl,-O2,-z,relro,-z,now" \
       --enable-avcodec \
       --enable-avformat \
       --enable-avfilter \
       --enable-swresample \
       --enable-protocol=file,pipe \
-      --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg,opus \
+      --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg \
       --enable-decoder=alac,aac,aac_fixed,mp3,mp3float,flac,opus,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le \
       --enable-parser=aac,mpegaudio,flac,opus \
       --enable-encoder=libopus,libmp3lame,pcm_s16le \
@@ -914,7 +948,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG THIN_LTO_FLAGS
 ARG LLD_FLAGS
-ARG LLD_LTO_FLAGS
 ARG GOAMD64_VERSION
 ARG SQLITE_EXTRA_CFLAGS
 
@@ -949,8 +982,8 @@ RUN wget --https-only --max-redirect=3 -qO taglib.tar.gz \
       -DCMAKE_RANLIB=llvm-ranlib \
       -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
       -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j"${NAVIDROME_BUILD_CORES}" install
 
@@ -971,12 +1004,12 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CXX=clang++ \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
+    CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
-    EXTLDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" && \
+    EXTLDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build -p "${NAVIDROME_BUILD_CORES}" \
       -trimpath \
