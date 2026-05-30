@@ -2,7 +2,7 @@
 
 # =========================================================
 # JBS Networks NGINX 5.1 - NGINX 1.31.1 Mainline / Network-Optimized Build
-# 기준일: 2026-05-25
+# 기준일: 2026-05-30
 #
 # 핵심 방향:
 #  - rootless Docker 아님
@@ -13,7 +13,7 @@
 #
 # 주요 버전:
 #  - NGINX 1.31.1 Mainline
-#  - AWS-LC v1.73.0
+#  - AWS-LC v5.0.0
 #  - PCRE2 10.47
 #  - jemalloc 5.3.1
 #  - zlib-rs 0.6.3
@@ -38,7 +38,7 @@ ARG NGINX_SHA256=9fcaaeb8f22544b09a19a761f3412c4112215422401634bebdd1296a403cc4b
 ARG PCRE2_VERSION=10.47
 ARG PCRE2_SHA256=c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16
 
-ARG AWSLC_VERSION=v1.73.0
+ARG AWSLC_VERSION=v5.0.0
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
@@ -146,7 +146,7 @@ RUN set -eux; \
     /usr/local/bin/pcre2-config --version
 
 # ---------------------------------------------------------
-# 2) AWS-LC v1.73.0
+# 2) AWS-LC v5.0.0
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
@@ -621,6 +621,6 @@ LABEL project="JBS Networks NGINX 5.1 Latest Mainline" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
       runtime.mode="rootful-container-root-master-nginx-workers" \
-      optimization="Znver3/Clang/LLD/Full-LTO/AWS-LC-IPO/Jemalloc/zlib-rs-fat-LTO/Brotli-IPO/Zstd/HTTP3/ReverseProxy-Trimmed"
+      optimization="Znver3/Clang/LLD/Full-LTO/AWS-LC-5.x-IPO/Jemalloc/zlib-rs-fat-LTO/Brotli-IPO/Zstd/HTTP3/ReverseProxy-Trimmed"
 
 CMD ["nginx", "-g", "daemon off;"]
