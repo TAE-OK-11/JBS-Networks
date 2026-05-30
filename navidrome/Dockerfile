@@ -23,6 +23,8 @@
 #   - unsupported _stmt_cache_size removed from ND_DBPATH
 #   - MALLOC_CONF stats_print:false removed
 #   - preflight respects custom ND_FFMPEGPATH and .real path
+#   - Opus/LAME autotools builds force lld via CC/CXX
+#   - Opus/LAME autotools builds do not pass lld-only --lto-O3
 #
 # Policy:
 #   - AMD EPYC Zen3 only
@@ -165,8 +167,6 @@ ARG OPUS_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
-ARG LLD_FLAGS
-ARG LLD_LTO_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -193,10 +193,18 @@ RUN wget --https-only --max-redirect=3 -qO opus.tar.gz \
 
 WORKDIR /build/opus
 
-RUN CC=clang CXX=clang++ \
+# Autotools/libtool fix:
+# - Force lld through CC/CXX.
+# - Do not pass lld-only --lto-O3 here because libtool may call GNU ld.
+RUN CC="clang -fuse-ld=lld" \
+    CXX="clang++ -fuse-ld=lld" \
+    AR=llvm-ar \
+    RANLIB=llvm-ranlib \
+    NM=llvm-nm \
+    STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" \
+    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --enable-shared \
@@ -215,8 +223,6 @@ ARG LAME_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
-ARG LLD_FLAGS
-ARG LLD_LTO_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -244,10 +250,18 @@ RUN wget --https-only --max-redirect=3 -qO lame.tar.gz \
 
 WORKDIR /build/lame
 
-RUN CC=clang CXX=clang++ \
+# Autotools/libtool fix:
+# - Force lld through CC/CXX.
+# - Do not pass lld-only --lto-O3 here because libtool may call GNU ld.
+RUN CC="clang -fuse-ld=lld" \
+    CXX="clang++ -fuse-ld=lld" \
+    AR=llvm-ar \
+    RANLIB=llvm-ranlib \
+    NM=llvm-nm \
+    STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS} ${LLD_LTO_FLAGS}" \
+    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --enable-shared \
@@ -1136,7 +1150,7 @@ EXPOSE 4533
 
 STOPSIGNAL SIGTERM
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 
 WORKDIR /app
