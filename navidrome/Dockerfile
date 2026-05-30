@@ -1,33 +1,27 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.0
+# JBS Networks Navidrome Ultra 6.0 Final Stable
 # AMD EPYC Zen3 Dedicated Edition
-# ALAC Source / Opus-MP3 Transcode / WebP Artwork Cache
 #
-# Fixed:
-#   - preflight --strict actually stops startup
+# Core:
+#   Navidrome v0.61.2
+#   Go 1.26.3 / Node 24 LTS / Rust 1.95.0
+#   FFmpeg 8.1.1 / libopus 1.6.1 / LAME 3.100
+#   TagLib 2.3 / jemalloc 5.3.1
+#
+# Final fixes:
 #   - Rust binary /entrypoint removed
-#   - /entrypoint replaced with POSIX sh script
-#   - Rust helpers remain as static musl binaries
-#   - heredoc + && split into separate RUN blocks
-#   - safer base image tags
-#   - SQLITE_DQS=0 removed
-#   - SQLITE_OMIT_LOAD_EXTENSION removed from CFLAGS/build tags
-#   - /usr/local whole COPY removed
-#   - SHA256 + tar sanity checks added
-#   - ND_DBPATH uses _locking_mode=NORMAL
-#   - unsupported _stmt_cache_size removed
-#   - MALLOC_CONF stats_print:false removed
-#   - preflight respects custom ND_FFMPEGPATH and .real path
-#   - Opus/LAME autotools builds force lld via CC/CXX
-#   - Opus/LAME autotools builds do not pass lld-only --lto-O3
-#   - LAME 3.100 ld.lld version-script fixed with --undefined-version
-#   - LAME libmp3lame.pc generated manually
+#   - POSIX sh /entrypoint added
+#   - preflight helper fallback added
+#   - helper missing no longer kills container before fallback
+#   - LAME pkg-config generated manually
+#   - LAME ld.lld version-script issue handled
 #   - FFmpeg opus demuxer removed
-#   - FFmpeg include/lib/rpath-link paths explicit
-#   - FFmpeg cross-compile mode enabled for znver3 GitHub runner safety
-#   - file package added to ffmpeg-builder/gobuilder
+#   - FFmpeg cross-compile configure mode enabled
+#   - FFmpeg lib path/include path explicit
+#   - file package added where file command is used
+#   - SQLite and jemalloc runtime flags cleaned
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -920,7 +914,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint" \
+      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint-Fallback" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -929,7 +923,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       zlib1g \
       libstdc++6 \
-      tzdata && \
+      tzdata \
+      grep && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
@@ -972,6 +967,19 @@ COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/heal
 COPY --link --chmod=755 --from=rust-builder /out/jbs-sqlite-maint /usr/local/bin/jbs-sqlite-maint
 COPY --link --chmod=755 --from=rust-builder /out/jbs-cache-warm /usr/local/bin/jbs-cache-warm
 COPY --link --chmod=755 --from=rust-builder /out/jbs-ffmpeg-preflight /usr/local/bin/jbs-ffmpeg-preflight
+
+RUN test -s /usr/local/bin/healthcheck && \
+    test -s /usr/local/bin/jbs-sqlite-maint && \
+    test -s /usr/local/bin/jbs-cache-warm && \
+    test -s /usr/local/bin/jbs-ffmpeg-preflight && \
+    chmod 755 /usr/local/bin/healthcheck \
+              /usr/local/bin/jbs-sqlite-maint \
+              /usr/local/bin/jbs-cache-warm \
+              /usr/local/bin/jbs-ffmpeg-preflight && \
+    ls -l /usr/local/bin/healthcheck \
+          /usr/local/bin/jbs-sqlite-maint \
+          /usr/local/bin/jbs-cache-warm \
+          /usr/local/bin/jbs-ffmpeg-preflight
 
 RUN cat > /entrypoint <<'SH'
 #!/bin/sh
@@ -1029,15 +1037,72 @@ run_required() {
     return 0
 }
 
-run_required "${JBS_FFMPEG_PREFLIGHT:-true}" \
-    /usr/local/bin/jbs-ffmpeg-preflight --strict
+ffmpeg_fallback_preflight() {
+    if [ ! -x /usr/local/bin/ffmpeg.real ]; then
+        echo "[entrypoint] ffmpeg.real missing or not executable" >&2
+        return 1
+    fi
 
-run_optional "${JBS_SQLITE_MAINT:-true}" \
-    /usr/local/bin/jbs-sqlite-maint startup
+    /usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 | grep -q 'libopus' || {
+        echo "[entrypoint] missing ffmpeg encoder: libopus" >&2
+        return 1
+    }
+
+    /usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 | grep -q 'libmp3lame' || {
+        echo "[entrypoint] missing ffmpeg encoder: libmp3lame" >&2
+        return 1
+    }
+
+    /usr/local/bin/ffmpeg.real -hide_banner -decoders 2>&1 | grep -q 'alac' || {
+        echo "[entrypoint] missing ffmpeg decoder: alac" >&2
+        return 1
+    }
+
+    /usr/local/bin/ffmpeg.real -hide_banner -decoders 2>&1 | grep -q 'mp3' || {
+        echo "[entrypoint] missing ffmpeg decoder: mp3" >&2
+        return 1
+    }
+
+    echo "[entrypoint] ffmpeg fallback preflight ok" >&2
+    return 0
+}
+
+if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
+    if [ -x /usr/local/bin/jbs-ffmpeg-preflight ]; then
+        set +e
+        /usr/local/bin/jbs-ffmpeg-preflight --strict
+        code="$?"
+        set -e
+
+        if [ "$code" -eq 0 ]; then
+            :
+        elif [ "$code" -eq 127 ]; then
+            echo "[entrypoint] jbs-ffmpeg-preflight returned 127; using ffmpeg.real fallback" >&2
+            run_required "true" ffmpeg_fallback_preflight
+        else
+            echo "[entrypoint] required helper failed: jbs-ffmpeg-preflight --strict status=${code}" >&2
+            exit "$code"
+        fi
+    else
+        echo "[entrypoint] jbs-ffmpeg-preflight missing; using ffmpeg.real fallback" >&2
+        run_required "true" ffmpeg_fallback_preflight
+    fi
+fi
+
+if [ -x /usr/local/bin/jbs-sqlite-maint ]; then
+    run_optional "${JBS_SQLITE_MAINT:-true}" \
+        /usr/local/bin/jbs-sqlite-maint startup
+else
+    echo "[entrypoint] jbs-sqlite-maint missing; skipping sqlite startup maintenance" >&2
+fi
 
 if is_true "${JBS_CACHE_WARM:-true}"; then
-    run_optional "true" \
-        /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-512}"
+    if [ -x /usr/local/bin/jbs-cache-warm ]; then
+        run_optional "true" \
+            /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-512}"
+    else
+        echo "[entrypoint] jbs-cache-warm missing; skipping cache warm" >&2
+    fi
 fi
 
 exec /app/navidrome "$@"
