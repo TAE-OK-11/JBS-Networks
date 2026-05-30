@@ -25,6 +25,7 @@
 #   - preflight respects custom ND_FFMPEGPATH and .real path
 #   - Opus/LAME autotools builds force lld via CC/CXX
 #   - Opus/LAME autotools builds do not pass lld-only --lto-O3
+#   - LAME 3.100 ld.lld version-script issue fixed with --undefined-version
 #
 # Policy:
 #   - AMD EPYC Zen3 only
@@ -193,9 +194,6 @@ RUN wget --https-only --max-redirect=3 -qO opus.tar.gz \
 
 WORKDIR /build/opus
 
-# Autotools/libtool fix:
-# - Force lld through CC/CXX.
-# - Do not pass lld-only --lto-O3 here because libtool may call GNU ld.
 RUN CC="clang -fuse-ld=lld" \
     CXX="clang++ -fuse-ld=lld" \
     AR=llvm-ar \
@@ -250,9 +248,6 @@ RUN wget --https-only --max-redirect=3 -qO lame.tar.gz \
 
 WORKDIR /build/lame
 
-# Autotools/libtool fix:
-# - Force lld through CC/CXX.
-# - Do not pass lld-only --lto-O3 here because libtool may call GNU ld.
 RUN CC="clang -fuse-ld=lld" \
     CXX="clang++ -fuse-ld=lld" \
     AR=llvm-ar \
@@ -261,7 +256,7 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
+    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--undefined-version" \
     ./configure \
       --prefix=/usr/local \
       --enable-shared \
