@@ -7,6 +7,9 @@
 #
 # Fixed:
 #   - preflight --strict actually stops startup
+#   - Rust binary /entrypoint removed
+#   - /entrypoint replaced with POSIX sh script
+#   - Rust helpers remain as static musl binaries
 #   - heredoc + && split into separate RUN blocks
 #   - safer base image tags
 #   - SQLITE_DQS=0 removed
@@ -390,7 +393,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN mkdir -p \
-      entrypoint/src \
       healthcheck/src \
       sqlite-maint/src \
       cache-warm/src \
@@ -399,7 +401,6 @@ RUN mkdir -p \
 RUN cat > Cargo.toml <<'TOML'
 [workspace]
 members = [
-  "entrypoint",
   "healthcheck",
   "sqlite-maint",
   "cache-warm",
@@ -414,97 +415,6 @@ codegen-units = 1
 strip = true
 panic = "abort"
 TOML
-
-RUN cat > entrypoint/Cargo.toml <<'TOML'
-[package]
-name = "entrypoint"
-version = "0.1.0"
-edition = "2021"
-TOML
-
-RUN cat > entrypoint/src/main.rs <<'RUST'
-use std::env;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
-
-fn env_true(name: &str, default: bool) -> bool {
-    match env::var(name) {
-        Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => default,
-    }
-}
-
-fn run_optional(cmd: &str, args: &[&str], enabled: bool) {
-    if !enabled {
-        return;
-    }
-
-    match Command::new(cmd).args(args).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!(
-            "[entrypoint] optional helper failed: {cmd} {:?} status={}",
-            args, status
-        ),
-        Err(err) => eprintln!(
-            "[entrypoint] optional helper could not start: {cmd} {:?}: {err}",
-            args
-        ),
-    }
-}
-
-fn run_required(cmd: &str, args: &[&str], enabled: bool) {
-    if !enabled {
-        return;
-    }
-
-    match Command::new(cmd).args(args).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            eprintln!(
-                "[entrypoint] required helper failed: {cmd} {:?} status={}",
-                args, status
-            );
-            std::process::exit(status.code().unwrap_or(1));
-        }
-        Err(err) => {
-            eprintln!(
-                "[entrypoint] required helper could not start: {cmd} {:?}: {err}",
-                args
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-fn main() {
-    run_required(
-        "/usr/local/bin/jbs-ffmpeg-preflight",
-        &["--strict"],
-        env_true("JBS_FFMPEG_PREFLIGHT", true),
-    );
-
-    run_optional(
-        "/usr/local/bin/jbs-sqlite-maint",
-        &["startup"],
-        env_true("JBS_SQLITE_MAINT", true),
-    );
-
-    if env_true("JBS_CACHE_WARM", true) {
-        let limit = env::var("JBS_CACHE_WARM_LIMIT_MB").unwrap_or_else(|_| "512".to_string());
-        run_optional(
-            "/usr/local/bin/jbs-cache-warm",
-            &["--limit-mb", &limit],
-            true,
-        );
-    }
-
-    let args: Vec<String> = env::args().skip(1).collect();
-    let err = Command::new("/app/navidrome").args(&args).exec();
-
-    eprintln!("[entrypoint] exec failed: {err}");
-    std::process::exit(1);
-}
-RUST
 
 RUN cat > healthcheck/Cargo.toml <<'TOML'
 [package]
@@ -899,7 +809,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1" \
     cargo build --release --target x86_64-unknown-linux-musl -j"${NAVIDROME_BUILD_CORES}" && \
     mkdir -p /out && \
-    cp target/x86_64-unknown-linux-musl/release/entrypoint /out/entrypoint && \
     cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck && \
     cp target/x86_64-unknown-linux-musl/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
     cp target/x86_64-unknown-linux-musl/release/jbs-cache-warm /out/jbs-cache-warm && \
@@ -1011,7 +920,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork" \
+      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -1059,11 +968,82 @@ RUN groupadd -g 1000 navidrome && \
 
 COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
 
-COPY --link --chmod=755 --from=rust-builder /out/entrypoint /entrypoint
 COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
 COPY --link --chmod=755 --from=rust-builder /out/jbs-sqlite-maint /usr/local/bin/jbs-sqlite-maint
 COPY --link --chmod=755 --from=rust-builder /out/jbs-cache-warm /usr/local/bin/jbs-cache-warm
 COPY --link --chmod=755 --from=rust-builder /out/jbs-ffmpeg-preflight /usr/local/bin/jbs-ffmpeg-preflight
+
+RUN cat > /entrypoint <<'SH'
+#!/bin/sh
+set -eu
+
+is_true() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+run_optional() {
+    enabled="$1"
+    shift
+
+    if ! is_true "$enabled"; then
+        return 0
+    fi
+
+    set +e
+    "$@"
+    code="$?"
+    set -e
+
+    if [ "$code" -ne 0 ]; then
+        echo "[entrypoint] optional helper failed: $* status=${code}" >&2
+    fi
+
+    return 0
+}
+
+run_required() {
+    enabled="$1"
+    shift
+
+    if ! is_true "$enabled"; then
+        return 0
+    fi
+
+    set +e
+    "$@"
+    code="$?"
+    set -e
+
+    if [ "$code" -ne 0 ]; then
+        echo "[entrypoint] required helper failed: $* status=${code}" >&2
+        exit "$code"
+    fi
+
+    return 0
+}
+
+run_required "${JBS_FFMPEG_PREFLIGHT:-true}" \
+    /usr/local/bin/jbs-ffmpeg-preflight --strict
+
+run_optional "${JBS_SQLITE_MAINT:-true}" \
+    /usr/local/bin/jbs-sqlite-maint startup
+
+if is_true "${JBS_CACHE_WARM:-true}"; then
+    run_optional "true" \
+        /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-512}"
+fi
+
+exec /app/navidrome "$@"
+SH
+
+RUN chmod 755 /entrypoint
 
 USER 1000:1000
 
