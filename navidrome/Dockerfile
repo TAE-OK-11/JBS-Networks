@@ -5,42 +5,26 @@
 # AMD EPYC Zen3 Dedicated Edition
 # ALAC Source / Opus-MP3 Transcode / WebP Artwork Cache
 #
-# Core:
-#   Navidrome v0.61.2
-#   Go 1.26.3 / Node 24 LTS / Rust 1.95.0
-#   FFmpeg 8.1.1 / libopus 1.6.1 / LAME 3.100
-#   TagLib 2.3 / jemalloc 5.3.1
-#
 # Fixed:
-#   - preflight --strict now actually stops startup
+#   - preflight --strict actually stops startup
 #   - heredoc + && split into separate RUN blocks
-#   - base image tags changed to safer existing-family tags
+#   - safer base image tags
 #   - SQLITE_DQS=0 removed
 #   - SQLITE_OMIT_LOAD_EXTENSION removed from CFLAGS/build tags
 #   - /usr/local whole COPY removed
 #   - SHA256 + tar sanity checks added
 #   - ND_DBPATH uses _locking_mode=NORMAL
-#   - unsupported _stmt_cache_size removed from ND_DBPATH
+#   - unsupported _stmt_cache_size removed
 #   - MALLOC_CONF stats_print:false removed
 #   - preflight respects custom ND_FFMPEGPATH and .real path
 #   - Opus/LAME autotools builds force lld via CC/CXX
 #   - Opus/LAME autotools builds do not pass lld-only --lto-O3
-#   - LAME 3.100 ld.lld version-script issue fixed with --undefined-version
-#   - LAME pkg-config file generated manually for FFmpeg configure
-#   - FFmpeg opus demuxer removed; Ogg demuxer handles Ogg Opus
-#   - FFmpeg configure uses explicit include/lib/rpath-link paths
-#   - FFmpeg configure uses cross-compile mode to avoid running znver3 test binaries on non-Zen3 GitHub runners
-#   - FFmpeg --lto-O3 removed to avoid linker/toolchain mismatch
-#
-# Policy:
-#   - AMD EPYC Zen3 only
-#   - No Python
-#   - No cover materializer
-#   - Rust helpers included as static musl binaries
-#   - FFmpeg focused on Opus/MP3 transcoding
-#   - AAC/FLAC output transcode intentionally excluded
-#   - WebP artwork cache enabled
-#   - SQLite WAL/FTS5/STAT4/mmap optimized
+#   - LAME 3.100 ld.lld version-script fixed with --undefined-version
+#   - LAME libmp3lame.pc generated manually
+#   - FFmpeg opus demuxer removed
+#   - FFmpeg include/lib/rpath-link paths explicit
+#   - FFmpeg cross-compile mode enabled for znver3 GitHub runner safety
+#   - file package added to ffmpeg-builder/gobuilder
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -122,7 +106,6 @@ ARG JEMALLOC_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG THIN_LTO_FLAGS
-ARG LLD_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -285,7 +268,7 @@ RUN CC="clang -fuse-ld=lld" \
       'Libs: -L${libdir} -lmp3lame -lm' \
       'Cflags: -I${includedir}' \
       > /usr/local/lib/pkgconfig/libmp3lame.pc && \
-    pkg-config --modversion libmp3lame && \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion libmp3lame && \
     find /usr/local/lib -name "libmp3lame.so.*" ! -type l -exec strip --strip-unneeded {} +
 
 # =========================================================
@@ -314,7 +297,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       nasm \
       wget \
       ca-certificates \
-      xz-utils
+      xz-utils \
+      file
 
 COPY --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
@@ -324,6 +308,9 @@ COPY --from=lame-builder /usr/local/lib/libmp3lame.so* /usr/local/lib/
 COPY --from=lame-builder /usr/local/lib/pkgconfig/libmp3lame.pc /usr/local/lib/pkgconfig/
 COPY --from=lame-builder /usr/local/include/lame /usr/local/include/lame
 
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig \
+    LD_LIBRARY_PATH=/usr/local/lib
+
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
     ldconfig && \
     pkg-config --modversion opus && \
@@ -331,9 +318,6 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
     pkg-config --libs libmp3lame && \
     test -f /usr/local/include/lame/lame.h && \
     test -e /usr/local/lib/libmp3lame.so
-
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig \
-    LD_LIBRARY_PATH=/usr/local/lib
 
 WORKDIR /build
 
@@ -963,7 +947,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       pkg-config \
       wget \
-      libutfcpp-dev
+      libutfcpp-dev \
+      file
 
 WORKDIR /taglib-build
 
