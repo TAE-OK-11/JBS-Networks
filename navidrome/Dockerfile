@@ -17,6 +17,8 @@
 #   - jemalloc applied only to Navidrome process after runtime preload test
 #   - jemalloc failure falls back to system allocator
 #   - helper/preflight/healthcheck run without forced jemalloc
+#   - Build-time binary execution checks removed to avoid GitHub Actions/BuildKit SIGSEGV 139
+#   - Runtime validation remains in entrypoint on real Zen3 host
 #   - POSIX sh entrypoint
 # =========================================================
 
@@ -968,36 +970,25 @@ COPY --link --chmod=755 --from=rust-builder /out/jbs-sqlite-maint /usr/local/bin
 COPY --link --chmod=755 --from=rust-builder /out/jbs-cache-warm /usr/local/bin/jbs-cache-warm
 COPY --link --chmod=755 --from=rust-builder /out/jbs-ffmpeg-preflight /usr/local/bin/jbs-ffmpeg-preflight
 
-RUN test -s /app/navidrome && \
-    test -s /usr/local/bin/healthcheck && \
-    test -s /usr/local/bin/jbs-sqlite-maint && \
-    test -s /usr/local/bin/jbs-cache-warm && \
-    test -s /usr/local/bin/jbs-ffmpeg-preflight && \
-    chmod 755 /app/navidrome \
-              /usr/local/bin/healthcheck \
-              /usr/local/bin/jbs-sqlite-maint \
-              /usr/local/bin/jbs-cache-warm \
-              /usr/local/bin/jbs-ffmpeg-preflight && \
-    ls -l /app/navidrome \
-          /usr/local/bin/healthcheck \
-          /usr/local/bin/jbs-sqlite-maint \
-          /usr/local/bin/jbs-cache-warm \
-          /usr/local/bin/jbs-ffmpeg-preflight
-
-RUN file /app/navidrome && \
+# Build-time safe checks only.
+# Do NOT execute Zen3-optimized binaries in GitHub Actions/BuildKit.
+RUN test -x /app/navidrome && \
+    test -x /usr/local/bin/ffmpeg.real && \
+    test -x /usr/local/bin/ffprobe && \
+    test -x /usr/local/bin/healthcheck && \
+    test -x /usr/local/bin/jbs-sqlite-maint && \
+    test -x /usr/local/bin/jbs-cache-warm && \
+    test -x /usr/local/bin/jbs-ffmpeg-preflight && \
+    file /app/navidrome && \
     file /usr/local/bin/ffmpeg.real && \
     file /usr/local/bin/ffprobe && \
     file /usr/local/bin/healthcheck && \
     file /usr/local/bin/jbs-sqlite-maint && \
     file /usr/local/bin/jbs-cache-warm && \
     file /usr/local/bin/jbs-ffmpeg-preflight && \
-    ldd /app/navidrome && \
-    ldd /usr/local/bin/ffmpeg.real && \
-    ldd /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffprobe -hide_banner -version >/dev/null && \
-    /usr/local/bin/jbs-ffmpeg-preflight --strict && \
-    /usr/local/bin/jbs-sqlite-maint startup && \
-    /usr/local/bin/jbs-cache-warm --limit-mb 0
+    ldconfig -p | grep -q 'libjemalloc.so.2' && \
+    ldconfig -p | grep -q 'libopus.so' && \
+    ldconfig -p | grep -q 'libmp3lame.so'
 
 RUN cat > /entrypoint <<'SH'
 #!/bin/sh
@@ -1161,7 +1152,8 @@ configure_allocator
 exec /app/navidrome "$@"
 SH
 
-RUN chmod 755 /entrypoint
+RUN chmod 755 /entrypoint && \
+    /bin/sh -n /entrypoint
 
 USER 1000:1000
 
