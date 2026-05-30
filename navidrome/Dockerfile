@@ -10,16 +10,17 @@
 #   FFmpeg 8.1.1 / libopus 1.6.1 / LAME 3.100
 #   TagLib 2.3 / jemalloc 5.3.1
 #
-# Final fixes:
+# Fixed:
 #   - Rust binary /entrypoint removed
 #   - POSIX sh /entrypoint added
+#   - release stage includes musl runtime for Rust musl helpers
 #   - preflight helper fallback added
-#   - helper missing no longer kills container before fallback
+#   - helper 126/127 does not kill Navidrome if fallback succeeds
 #   - LAME pkg-config generated manually
-#   - LAME ld.lld version-script issue handled
+#   - LAME ld.lld version-script fixed with --undefined-version
 #   - FFmpeg opus demuxer removed
 #   - FFmpeg cross-compile configure mode enabled
-#   - FFmpeg lib path/include path explicit
+#   - FFmpeg include/lib/rpath-link paths explicit
 #   - file package added where file command is used
 #   - SQLite and jemalloc runtime flags cleaned
 # =========================================================
@@ -914,7 +915,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint-Fallback" \
+      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint-Fallback/Musl-Runtime" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -924,7 +925,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       zlib1g \
       libstdc++6 \
       tzdata \
-      grep && \
+      grep \
+      musl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
@@ -1009,6 +1011,11 @@ run_optional() {
     code="$?"
     set -e
 
+    if [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; then
+        echo "[entrypoint] optional helper unavailable: $* status=${code}; skipping" >&2
+        return 0
+    fi
+
     if [ "$code" -ne 0 ]; then
         echo "[entrypoint] optional helper failed: $* status=${code}" >&2
     fi
@@ -1076,8 +1083,8 @@ if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
 
         if [ "$code" -eq 0 ]; then
             :
-        elif [ "$code" -eq 127 ]; then
-            echo "[entrypoint] jbs-ffmpeg-preflight returned 127; using ffmpeg.real fallback" >&2
+        elif [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; then
+            echo "[entrypoint] jbs-ffmpeg-preflight unavailable; using ffmpeg.real fallback status=${code}" >&2
             run_required "true" ffmpeg_fallback_preflight
         else
             echo "[entrypoint] required helper failed: jbs-ffmpeg-preflight --strict status=${code}" >&2
