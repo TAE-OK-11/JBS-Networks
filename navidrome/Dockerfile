@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.0 Final Stable
+# JBS Networks Navidrome Ultra 6.0 Final Stable+
 # AMD EPYC Zen3 Dedicated Edition
 #
 # Core:
@@ -10,19 +10,15 @@
 #   FFmpeg 8.1.1 / libopus 1.6.1 / LAME 3.100
 #   TagLib 2.3 / jemalloc 5.3.1
 #
-# Fixed:
-#   - Rust binary /entrypoint removed
-#   - POSIX sh /entrypoint added
-#   - release stage includes musl runtime for Rust musl helpers
-#   - preflight helper fallback added
-#   - helper 126/127 does not kill Navidrome if fallback succeeds
-#   - LAME pkg-config generated manually
-#   - LAME ld.lld version-script fixed with --undefined-version
-#   - FFmpeg opus demuxer removed
-#   - FFmpeg cross-compile configure mode enabled
-#   - FFmpeg include/lib/rpath-link paths explicit
-#   - file package added where file command is used
-#   - SQLite and jemalloc runtime flags cleaned
+# Stability Fixed:
+#   - Rust helper binaries built for glibc, not musl
+#   - Fixed LD_PRELOAD jemalloc + musl helper __register_atfork crash
+#   - LD_PRELOAD removed from global ENV
+#   - jemalloc applied only to Navidrome process after runtime preload test
+#   - jemalloc failure falls back to system allocator
+#   - helper/preflight/healthcheck run without forced jemalloc
+#   - release stage includes binary/ldd/preflight checks
+#   - POSIX sh entrypoint
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -369,6 +365,7 @@ RUN ./configure \
 
 # =========================================================
 # Rust helper binaries
+# glibc build: compatible with Debian runtime + jemalloc
 # =========================================================
 
 FROM ${RUST_IMAGE} AS rust-builder
@@ -379,11 +376,9 @@ ARG RUST_TARGET_CPU
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      musl-tools \
       build-essential \
       pkg-config \
-      ca-certificates && \
-    rustup target add x86_64-unknown-linux-musl
+      ca-certificates
 
 WORKDIR /build
 
@@ -799,15 +794,13 @@ RUST
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
-    CC_x86_64_unknown_linux_musl=musl-gcc \
     RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1" \
-    cargo build --release --target x86_64-unknown-linux-musl -j"${NAVIDROME_BUILD_CORES}" && \
+    cargo build --release -j"${NAVIDROME_BUILD_CORES}" && \
     mkdir -p /out && \
-    cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-cache-warm /out/jbs-cache-warm && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-ffmpeg-preflight /out/jbs-ffmpeg-preflight
+    cp target/release/healthcheck /out/healthcheck && \
+    cp target/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
+    cp target/release/jbs-cache-warm /out/jbs-cache-warm && \
+    cp target/release/jbs-ffmpeg-preflight /out/jbs-ffmpeg-preflight
 
 # =========================================================
 # UI build
@@ -915,7 +908,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc/RustHelpers/WebP-Artwork/Shell-Entrypoint-Fallback/Musl-Runtime" \
+      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-SafeFallback/RustHelpers-glibc/WebP-Artwork/Shell-Entrypoint" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -924,9 +917,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       zlib1g \
       libstdc++6 \
+      libgcc-s1 \
       tzdata \
-      grep \
-      musl && \
+      grep && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
@@ -970,18 +963,33 @@ COPY --link --chmod=755 --from=rust-builder /out/jbs-sqlite-maint /usr/local/bin
 COPY --link --chmod=755 --from=rust-builder /out/jbs-cache-warm /usr/local/bin/jbs-cache-warm
 COPY --link --chmod=755 --from=rust-builder /out/jbs-ffmpeg-preflight /usr/local/bin/jbs-ffmpeg-preflight
 
-RUN test -s /usr/local/bin/healthcheck && \
+RUN test -s /app/navidrome && \
+    test -s /usr/local/bin/healthcheck && \
     test -s /usr/local/bin/jbs-sqlite-maint && \
     test -s /usr/local/bin/jbs-cache-warm && \
     test -s /usr/local/bin/jbs-ffmpeg-preflight && \
-    chmod 755 /usr/local/bin/healthcheck \
+    chmod 755 /app/navidrome \
+              /usr/local/bin/healthcheck \
               /usr/local/bin/jbs-sqlite-maint \
               /usr/local/bin/jbs-cache-warm \
               /usr/local/bin/jbs-ffmpeg-preflight && \
-    ls -l /usr/local/bin/healthcheck \
+    ls -l /app/navidrome \
+          /usr/local/bin/healthcheck \
           /usr/local/bin/jbs-sqlite-maint \
           /usr/local/bin/jbs-cache-warm \
           /usr/local/bin/jbs-ffmpeg-preflight
+
+RUN ldd /app/navidrome && \
+    ldd /usr/local/bin/ffmpeg.real && \
+    ldd /usr/local/bin/ffprobe && \
+    ldd /usr/local/bin/healthcheck && \
+    ldd /usr/local/bin/jbs-sqlite-maint && \
+    ldd /usr/local/bin/jbs-cache-warm && \
+    ldd /usr/local/bin/jbs-ffmpeg-preflight && \
+    /usr/local/bin/ffprobe -hide_banner -version >/dev/null && \
+    /usr/local/bin/jbs-ffmpeg-preflight --strict && \
+    /usr/local/bin/jbs-sqlite-maint startup && \
+    /usr/local/bin/jbs-cache-warm --limit-mb 0
 
 RUN cat > /entrypoint <<'SH'
 #!/bin/sh
@@ -1017,7 +1025,7 @@ run_optional() {
     fi
 
     if [ "$code" -ne 0 ]; then
-        echo "[entrypoint] optional helper failed: $* status=${code}" >&2
+        echo "[entrypoint] optional helper failed: $* status=${code}; continuing" >&2
     fi
 
     return 0
@@ -1042,6 +1050,34 @@ run_required() {
     fi
 
     return 0
+}
+
+configure_allocator() {
+    unset LD_PRELOAD
+
+    if ! is_true "${JBS_USE_JEMALLOC:-true}"; then
+        echo "[entrypoint] jemalloc disabled by JBS_USE_JEMALLOC=false" >&2
+        return 0
+    fi
+
+    if [ ! -r /usr/local/lib/libjemalloc.so.2 ]; then
+        echo "[entrypoint] jemalloc not found; using system allocator" >&2
+        return 0
+    fi
+
+    set +e
+    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 /bin/true >/dev/null 2>&1
+    code="$?"
+    set -e
+
+    if [ "$code" -ne 0 ]; then
+        echo "[entrypoint] jemalloc preload test failed status=${code}; using system allocator" >&2
+        unset LD_PRELOAD
+        return 0
+    fi
+
+    export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
+    echo "[entrypoint] jemalloc enabled" >&2
 }
 
 ffmpeg_fallback_preflight() {
@@ -1112,6 +1148,8 @@ if is_true "${JBS_CACHE_WARM:-true}"; then
     fi
 fi
 
+configure_allocator
+
 exec /app/navidrome "$@"
 SH
 
@@ -1129,7 +1167,6 @@ ARG FFMPEG_THREADS
 
 ENV TZ=Asia/Seoul \
     TMPDIR=/cache/tmp \
-    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
     MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000,oversize_threshold:8388608" \
     GOMAXPROCS=${GOMAXPROCS} \
     GOGC=${GOGC} \
@@ -1209,7 +1246,8 @@ ENV TZ=Asia/Seoul \
     JBS_SQLITE_MAINT=true \
     JBS_CACHE_WARM=true \
     JBS_CACHE_WARM_LIMIT_MB=512 \
-    JBS_FFMPEG_PREFLIGHT=true
+    JBS_FFMPEG_PREFLIGHT=true \
+    JBS_USE_JEMALLOC=true
 
 EXPOSE 4533
 
