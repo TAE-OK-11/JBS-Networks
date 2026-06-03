@@ -4,24 +4,79 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - 'navidrome/**'  # navidrome 폴더 파일이 바뀔 때만 실행
+      - "navidrome/**"
+      - ".github/workflows/jbs-navidrome-build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: jbs-navidrome-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/jbs-navidrome
+  DOCKER_BUILD_RECORD_UPLOAD: false
+  DOCKER_BUILD_SUMMARY: true
 
 jobs:
   build:
+    name: Build and Push Navidrome
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          install: true
+          driver: docker-container
+          buildkitd-flags: --debug
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and Push
-        uses: docker/build-push-action@v5
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
         with:
-          context: ./navidrome  # <--- 빌드 경로를 navidrome 폴더로 지정
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=master-slim-v5,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=JBS Navidrome Ultra
+            org.opencontainers.image.description=JBS Networks Navidrome Ultra Slim Resource-Aware Build
+            org.opencontainers.image.vendor=JBS Networks
+
+      - name: Build and Push
+        uses: docker/build-push-action@v7
+        with:
+          context: "{{defaultContext}}:navidrome"
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/jbs-navidrome:latest
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+          build-args: |
+            NAVIDROME_REF=master
+            NAVIDROME_CACHEBUST=${{ github.sha }}
+            NAVIDROME_BUILD_CORES=4
+            GOAMD64_VERSION=v3
+            RUST_TARGET_CPU=znver3
+
+          cache-from: |
+            type=gha,scope=jbs-navidrome-amd64
+          cache-to: |
+            type=gha,mode=max,scope=jbs-navidrome-amd64,ignore-error=true
+
+          provenance: false
+          sbom: false
