@@ -1,33 +1,43 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.0 Final Stable+
+# JBS Networks Navidrome Ultra 6.0 Slim v5 Resource-Aware Final
 # AMD EPYC Zen3 Dedicated Edition
 #
 # Core:
-#   Navidrome v0.61.2
-#   Go 1.26.3 / Node 24 LTS / Rust 1.95.0
-#   FFmpeg 8.1.1 / libopus 1.6.1 / LAME 3.100
+#   Navidrome master HEAD by default
+#   Go 1.26.4 / Node 24.16.0 LTS / Rust 1.96.0 slim builder
+#   FFmpeg 8.1.1 / libopus 1.6.1 static / LAME 3.100 static
 #   TagLib 2.3 / jemalloc 5.3.1
 #
-# Stability Fixed:
-#   - Rust helper binaries remain musl for GitHub Actions build stability
-#   - Fixed LD_PRELOAD jemalloc + musl helper __register_atfork crash
-#   - LD_PRELOAD removed from global ENV
+# Slim v5:
+#   - Runtime package trim: no file / grep / musl / full tzdata / passwd
+#   - Minimal Asia/Seoul timezone copy only
+#   - libopus/libmp3lame statically linked into FFmpeg
+#   - Runtime keeps only libjemalloc.so.2 as custom shared lib
+#   - Rust helper binaries unified into one static musl jbs-helper
+#   - healthcheck/sqlite-maint/cache-warm/ffmpeg-preflight are symlinks
+#   - Optimized cache warm: reusable buffer, no candidate Vec allocation
+#   - Optimized preflight: fewer FFmpeg process calls
+#   - Static-link check for FFmpeg libopus/libmp3lame
+#   - Resource-aware runtime autotune:
+#       * GOMAXPROCS from cgroup CPU quota / nproc
+#       * GOMEMLIMIT from cgroup memory limit
+#       * FFMPEG_THREADS from CPU quota
+#       * Cache warm limit from memory size
+#   - No build-time execution of Zen3-optimized binaries
 #   - jemalloc applied only to Navidrome process after runtime preload test
-#   - jemalloc failure falls back to system allocator
-#   - helper/preflight/healthcheck run without forced jemalloc
-#   - Build-time binary execution checks removed to avoid GitHub Actions/BuildKit SIGSEGV 139
-#   - Runtime validation remains in entrypoint on real Zen3 host
-#   - POSIX sh entrypoint
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
-ARG NODE_IMAGE=node:24-bookworm-slim
-ARG GOLANG_IMAGE=golang:1.26.3-bookworm
-ARG RUST_IMAGE=rust:1.95.0-bookworm
+ARG NODE_IMAGE=node:24.16.0-bookworm-slim
+ARG GOLANG_IMAGE=golang:1.26.4-bookworm
+ARG RUST_IMAGE=rust:1.96.0-slim-bookworm
 
-ARG NAVIDROME_REF=v0.61.2
+# release fixed: v0.61.2
+# latest commit: master
+ARG NAVIDROME_REF=master
+ARG NAVIDROME_CACHEBUST=0
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.1
@@ -36,13 +46,19 @@ ARG LAME_VERSION=3.100
 ARG TAGLIB_VERSION=2.3
 
 ARG NAVIDROME_BUILD_CORES=4
-ARG FFMPEG_THREADS=2
-ARG GOMEMLIMIT=6GiB
-ARG GOMAXPROCS=4
+ARG FFMPEG_THREADS=auto
+ARG GOMEMLIMIT=auto
+ARG GOMAXPROCS=auto
 ARG GOGC=125
 ARG SCANSCHEDULE=0
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
+
+ARG JBS_GOMAXPROCS_MAX=4
+ARG JBS_FFMPEG_THREADS_MAX=2
+ARG JBS_GOMEMLIMIT_PERCENT=70
+ARG JBS_GOMEMLIMIT_MIN_MIB=256
+ARG JBS_GOMEMLIMIT_MAX_MIB=6144
 
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
@@ -77,18 +93,31 @@ ARG LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1
 FROM ${DEBIAN_IMAGE} AS source
 
 ARG NAVIDROME_REF
+ARG NAVIDROME_CACHEBUST
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       git \
-      ca-certificates
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
 RUN --mount=type=cache,target=/root/.cache/git \
-    git clone --branch "${NAVIDROME_REF}" --depth=1 https://github.com/navidrome/navidrome.git . && \
-    git rev-parse --short HEAD > /src/.git_sha
+    echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
+    git init . && \
+    git remote add origin https://github.com/navidrome/navidrome.git && \
+    if git ls-remote --exit-code --heads origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
+      git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}"; \
+    elif git ls-remote --exit-code --tags origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
+      git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}"; \
+    else \
+      git fetch --depth=1 origin "${NAVIDROME_REF}"; \
+    fi && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse --short=12 HEAD > /src/.git_sha && \
+    rm -rf .git
 
 # =========================================================
 # jemalloc
@@ -145,7 +174,7 @@ RUN CC="clang -fuse-ld=lld" \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
 # =========================================================
-# libopus
+# libopus static
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS opus-builder
@@ -192,13 +221,13 @@ RUN CC="clang -fuse-ld=lld" \
     LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
-      --enable-shared \
-      --disable-static && \
+      --disable-shared \
+      --enable-static && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    find /usr/local/lib -name "libopus.so.*" ! -type l -exec strip --strip-unneeded {} +
+    strip -g /usr/local/lib/libopus.a
 
 # =========================================================
-# LAME MP3 encoder
+# LAME MP3 encoder static
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS lame-builder
@@ -246,8 +275,8 @@ RUN CC="clang -fuse-ld=lld" \
     LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--undefined-version" \
     ./configure \
       --prefix=/usr/local \
-      --enable-shared \
-      --disable-static \
+      --disable-shared \
+      --enable-static \
       --disable-frontend && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     mkdir -p /usr/local/lib/pkgconfig && \
@@ -264,11 +293,12 @@ RUN CC="clang -fuse-ld=lld" \
       'Cflags: -I${includedir}' \
       > /usr/local/lib/pkgconfig/libmp3lame.pc && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion libmp3lame && \
-    find /usr/local/lib -name "libmp3lame.so.*" ! -type l -exec strip --strip-unneeded {} +
+    strip -g /usr/local/lib/libmp3lame.a
 
 # =========================================================
 # FFmpeg: Opus / MP3 specialized
 # AAC/FLAC output transcode intentionally excluded.
+# libopus/libmp3lame are statically linked.
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
@@ -295,11 +325,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       xz-utils \
       file
 
-COPY --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
+COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
 COPY --from=opus-builder /usr/local/include/opus /usr/local/include/opus
 
-COPY --from=lame-builder /usr/local/lib/libmp3lame.so* /usr/local/lib/
+COPY --from=lame-builder /usr/local/lib/libmp3lame.a /usr/local/lib/
 COPY --from=lame-builder /usr/local/lib/pkgconfig/libmp3lame.pc /usr/local/lib/pkgconfig/
 COPY --from=lame-builder /usr/local/include/lame /usr/local/include/lame
 
@@ -310,9 +340,11 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
     ldconfig && \
     pkg-config --modversion opus && \
     pkg-config --modversion libmp3lame && \
-    pkg-config --libs libmp3lame && \
+    pkg-config --libs --static opus && \
+    pkg-config --libs --static libmp3lame && \
     test -f /usr/local/include/lame/lame.h && \
-    test -e /usr/local/lib/libmp3lame.so
+    test -e /usr/local/lib/libopus.a && \
+    test -e /usr/local/lib/libmp3lame.a
 
 WORKDIR /build
 
@@ -329,6 +361,7 @@ RUN ./configure \
       --cc=clang \
       --cxx=clang++ \
       --pkg-config=pkg-config \
+      --pkg-config-flags=--static \
       --target-os=linux \
       --arch=x86_64 \
       --cpu=znver3 \
@@ -343,7 +376,7 @@ RUN ./configure \
       --enable-ffprobe \
       --disable-everything \
       --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-      --extra-ldflags="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
+      --extra-ldflags="-L/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
       --extra-ldexeflags="-Wl,-O2,-z,relro,-z,now" \
       --enable-avcodec \
       --enable-avformat \
@@ -365,8 +398,12 @@ RUN ./configure \
     file /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
 # =========================================================
-# Rust helper binaries
-# Keep musl target for GitHub Actions build compatibility
+# Rust unified helper
+# One static musl binary with symlink dispatch:
+#   healthcheck
+#   jbs-sqlite-maint
+#   jbs-cache-warm
+#   jbs-ffmpeg-preflight
 # =========================================================
 
 FROM ${RUST_IMAGE} AS rust-builder
@@ -385,21 +422,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /build
 
-RUN mkdir -p \
-      healthcheck/src \
-      sqlite-maint/src \
-      cache-warm/src \
-      ffmpeg-preflight/src
+RUN mkdir -p src
 
 RUN cat > Cargo.toml <<'TOML'
-[workspace]
-members = [
-  "healthcheck",
-  "sqlite-maint",
-  "cache-warm",
-  "ffmpeg-preflight"
-]
-resolver = "2"
+[package]
+name = "jbs-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
+walkdir = "=2.5.0"
 
 [profile.release]
 opt-level = 3
@@ -409,20 +442,29 @@ strip = true
 panic = "abort"
 TOML
 
-RUN cat > healthcheck/Cargo.toml <<'TOML'
-[package]
-name = "healthcheck"
-version = "0.1.0"
-edition = "2021"
-TOML
-
-RUN cat > healthcheck/src/main.rs <<'RUST'
+RUN cat > src/main.rs <<'RUST'
 use std::env;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
-fn main() {
+use rusqlite::{Connection, OpenFlags};
+use walkdir::WalkDir;
+
+const CHUNK: usize = 1024 * 1024;
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn is_cmd(name: &str, needle: &str) -> bool {
+    name == needle || name.ends_with(needle)
+}
+
+fn run_healthcheck() -> i32 {
     let port: u16 = env::var("ND_PORT")
         .unwrap_or_default()
         .parse()
@@ -433,7 +475,7 @@ fn main() {
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
-        Err(_) => std::process::exit(1),
+        Err(_) => return 1,
     };
 
     let _ = stream.set_read_timeout(Some(timeout));
@@ -444,7 +486,7 @@ fn main() {
     );
 
     if stream.write_all(req.as_bytes()).is_err() {
-        std::process::exit(1);
+        return 1;
     }
 
     let mut buf = [0u8; 512];
@@ -452,29 +494,11 @@ fn main() {
     let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
 
     if resp.starts_with("HTTP/1.") && resp.contains(" 200 ") {
-        std::process::exit(0);
+        0
+    } else {
+        1
     }
-
-    std::process::exit(1);
 }
-RUST
-
-RUN cat > sqlite-maint/Cargo.toml <<'TOML'
-[package]
-name = "jbs-sqlite-maint"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-rusqlite = { version = "0.39.0", features = ["bundled"] }
-TOML
-
-RUN cat > sqlite-maint/src/main.rs <<'RUST'
-use std::env;
-use std::path::Path;
-use std::time::Duration;
-
-use rusqlite::{Connection, OpenFlags};
 
 fn db_file_from_nd_dbpath(value: &str) -> Option<String> {
     let mut v = value.trim();
@@ -531,10 +555,10 @@ fn run_sql(label: &str, sql: &str) -> i32 {
     }
 }
 
-fn main() {
-    let mode = env::args().nth(1).unwrap_or_else(|| "startup".to_string());
+fn run_sqlite_maint(args: &[String]) -> i32 {
+    let mode = args.first().map(String::as_str).unwrap_or("startup");
 
-    let code = match mode.as_str() {
+    match mode {
         "startup" => run_sql(
             "startup",
             "
@@ -577,41 +601,19 @@ fn main() {
             eprintln!("[sqlite-maint] usage: jbs-sqlite-maint [startup|idle|shutdown|doctor]");
             2
         }
-    };
-
-    std::process::exit(code);
+    }
 }
-RUST
 
-RUN cat > cache-warm/Cargo.toml <<'TOML'
-[package]
-name = "jbs-cache-warm"
-version = "0.1.0"
-edition = "2021"
+fn parse_limit_mb(args: &[String]) -> u64 {
+    let mut i = 0;
 
-[dependencies]
-walkdir = "2.5.0"
-TOML
-
-RUN cat > cache-warm/src/main.rs <<'RUST'
-use std::env;
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-
-use walkdir::WalkDir;
-
-const CHUNK: usize = 1024 * 1024;
-
-fn parse_limit_mb() -> u64 {
-    let mut args = env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        if arg == "--limit-mb" {
-            if let Some(v) = args.next() {
+    while i < args.len() {
+        if args[i] == "--limit-mb" {
+            if let Some(v) = args.get(i + 1) {
                 return v.parse::<u64>().unwrap_or(512);
             }
         }
+        i += 1;
     }
 
     env::var("JBS_CACHE_WARM_LIMIT_MB")
@@ -620,7 +622,7 @@ fn parse_limit_mb() -> u64 {
         .unwrap_or(512)
 }
 
-fn read_some(path: &Path, remaining: &mut u64) {
+fn read_some(path: &Path, remaining: &mut u64, buf: &mut [u8]) {
     if *remaining == 0 {
         return;
     }
@@ -629,14 +631,12 @@ fn read_some(path: &Path, remaining: &mut u64) {
         return;
     };
 
-    let mut buf = vec![0u8; CHUNK];
-
     loop {
         if *remaining == 0 {
             break;
         }
 
-        let want = (*remaining).min(CHUNK as u64) as usize;
+        let want = (*remaining).min(buf.len() as u64) as usize;
 
         match f.read(&mut buf[..want]) {
             Ok(0) => break,
@@ -648,15 +648,36 @@ fn read_some(path: &Path, remaining: &mut u64) {
     eprintln!("[cache-warm] warmed {}", path.display());
 }
 
-fn candidate_files() -> Vec<PathBuf> {
+fn warm_fixed_db_files(data: &str, remaining: &mut u64, buf: &mut [u8]) {
+    let files = [
+        format!("{data}/navidrome.db"),
+        format!("{data}/navidrome.db-wal"),
+        format!("{data}/navidrome.db-shm"),
+    ];
+
+    for file in files {
+        if *remaining == 0 {
+            break;
+        }
+
+        read_some(Path::new(&file), remaining, buf);
+    }
+}
+
+fn run_cache_warm(args: &[String]) -> i32 {
+    let mut remaining = parse_limit_mb(args).saturating_mul(1024 * 1024);
+
+    if remaining == 0 {
+        return 0;
+    }
+
     let data = env::var("ND_DATAFOLDER").unwrap_or_else(|_| "/data".to_string());
     let cache = env::var("ND_CACHEFOLDER").unwrap_or_else(|_| "/cache".to_string());
+    let mut buf = vec![0u8; CHUNK];
 
-    let mut out = vec![
-        PathBuf::from(format!("{data}/navidrome.db")),
-        PathBuf::from(format!("{data}/navidrome.db-wal")),
-        PathBuf::from(format!("{data}/navidrome.db-shm")),
-    ];
+    warm_fixed_db_files(&data, &mut remaining, &mut buf);
+
+    let mut seen = 0usize;
 
     for entry in WalkDir::new(cache)
         .max_depth(3)
@@ -664,48 +685,19 @@ fn candidate_files() -> Vec<PathBuf> {
         .into_iter()
         .filter_map(Result::ok)
     {
+        if remaining == 0 || seen >= 512 {
+            break;
+        }
+
         if entry.file_type().is_file() {
-            out.push(entry.path().to_path_buf());
+            read_some(entry.path(), &mut remaining, &mut buf);
+            seen += 1;
         }
-
-        if out.len() > 512 {
-            break;
-        }
-    }
-
-    out
-}
-
-fn main() {
-    let mut remaining = parse_limit_mb().saturating_mul(1024 * 1024);
-
-    if remaining == 0 {
-        return;
-    }
-
-    for path in candidate_files() {
-        if remaining == 0 {
-            break;
-        }
-
-        read_some(&path, &mut remaining);
     }
 
     eprintln!("[cache-warm] done");
+    0
 }
-RUST
-
-RUN cat > ffmpeg-preflight/Cargo.toml <<'TOML'
-[package]
-name = "jbs-ffmpeg-preflight"
-version = "0.1.0"
-edition = "2021"
-TOML
-
-RUN cat > ffmpeg-preflight/src/main.rs <<'RUST'
-use std::env;
-use std::path::Path;
-use std::process::Command;
 
 fn ffmpeg_path() -> String {
     let configured = env::var("ND_FFMPEGPATH")
@@ -720,7 +712,7 @@ fn ffmpeg_path() -> String {
     }
 }
 
-fn capture(args: &[&str]) -> Result<String, String> {
+fn capture_ffmpeg(args: &[&str]) -> Result<String, String> {
     let output = Command::new(ffmpeg_path())
         .args(args)
         .output()
@@ -743,44 +735,38 @@ fn require(haystack: &str, needle: &str, failures: &mut Vec<String>) {
     }
 }
 
-fn main() {
-    let strict = env::args().any(|a| a == "--strict");
-
+fn run_ffmpeg_preflight(args: &[String]) -> i32 {
+    let strict = args.iter().any(|a| a == "--strict");
     let path = ffmpeg_path();
 
-    let enc = capture(&["-hide_banner", "-encoders"]).unwrap_or_default();
-    let dec = capture(&["-hide_banner", "-decoders"]).unwrap_or_default();
-    let mux = capture(&["-hide_banner", "-muxers"]).unwrap_or_default();
-    let demux = capture(&["-hide_banner", "-demuxers"]).unwrap_or_default();
-    let filters = capture(&["-hide_banner", "-filters"]).unwrap_or_default();
+    let codecs = capture_ffmpeg(&["-hide_banner", "-codecs"]).unwrap_or_default();
+    let formats = capture_ffmpeg(&["-hide_banner", "-formats"]).unwrap_or_default();
+    let filters = capture_ffmpeg(&["-hide_banner", "-filters"]).unwrap_or_default();
 
     let mut failures = Vec::new();
 
-    require(&enc, "libopus", &mut failures);
-    require(&enc, "libmp3lame", &mut failures);
+    require(&codecs, "libopus", &mut failures);
+    require(&codecs, "libmp3lame", &mut failures);
 
-    require(&dec, "alac", &mut failures);
-    require(&dec, "aac", &mut failures);
-    require(&dec, "mp3", &mut failures);
-    require(&dec, "flac", &mut failures);
-    require(&dec, "opus", &mut failures);
+    require(&codecs, "alac", &mut failures);
+    require(&codecs, "aac", &mut failures);
+    require(&codecs, "mp3", &mut failures);
+    require(&codecs, "flac", &mut failures);
+    require(&codecs, "opus", &mut failures);
 
-    require(&mux, "ogg", &mut failures);
-    require(&mux, "mp3", &mut failures);
-    require(&mux, "wav", &mut failures);
-
-    require(&demux, "mov", &mut failures);
-    require(&demux, "mp3", &mut failures);
-    require(&demux, "flac", &mut failures);
-    require(&demux, "wav", &mut failures);
-    require(&demux, "ogg", &mut failures);
+    require(&formats, "mov", &mut failures);
+    require(&formats, "mp3", &mut failures);
+    require(&formats, "flac", &mut failures);
+    require(&formats, "wav", &mut failures);
+    require(&formats, "ogg", &mut failures);
+    require(&formats, "opus", &mut failures);
 
     require(&filters, "aresample", &mut failures);
     require(&filters, "aformat", &mut failures);
 
     if failures.is_empty() {
         eprintln!("[ffmpeg-preflight] ok: {path}");
-        std::process::exit(0);
+        return 0;
     }
 
     eprintln!(
@@ -789,8 +775,52 @@ fn main() {
     );
 
     if strict {
-        std::process::exit(1);
+        1
+    } else {
+        0
     }
+}
+
+fn print_usage() -> i32 {
+    eprintln!(
+        "usage: jbs-helper [healthcheck|sqlite-maint|cache-warm|ffmpeg-preflight] [args...]"
+    );
+    2
+}
+
+fn main() {
+    let mut args: Vec<String> = env::args().collect();
+    let argv0 = args.first().cloned().unwrap_or_else(|| "jbs-helper".to_string());
+    let name = basename(&argv0).to_string();
+
+    let code = if is_cmd(&name, "healthcheck") {
+        run_healthcheck()
+    } else if is_cmd(&name, "jbs-sqlite-maint") {
+        let sub_args = args.split_off(1);
+        run_sqlite_maint(&sub_args)
+    } else if is_cmd(&name, "jbs-cache-warm") {
+        let sub_args = args.split_off(1);
+        run_cache_warm(&sub_args)
+    } else if is_cmd(&name, "jbs-ffmpeg-preflight") {
+        let sub_args = args.split_off(1);
+        run_ffmpeg_preflight(&sub_args)
+    } else {
+        let Some(cmd) = args.get(1).cloned() else {
+            std::process::exit(print_usage());
+        };
+
+        let sub_args: Vec<String> = args.into_iter().skip(2).collect();
+
+        match cmd.as_str() {
+            "healthcheck" => run_healthcheck(),
+            "sqlite-maint" => run_sqlite_maint(&sub_args),
+            "cache-warm" => run_cache_warm(&sub_args),
+            "ffmpeg-preflight" => run_ffmpeg_preflight(&sub_args),
+            _ => print_usage(),
+        }
+    };
+
+    std::process::exit(code);
 }
 RUST
 
@@ -799,13 +829,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
     CC_x86_64_unknown_linux_musl=musl-gcc \
-    RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C opt-level=3 -C lto=thin -C codegen-units=1" \
+    RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C target-feature=+crt-static -C opt-level=3 -C lto=thin -C codegen-units=1" \
     cargo build --release --target x86_64-unknown-linux-musl -j"${NAVIDROME_BUILD_CORES}" && \
     mkdir -p /out && \
-    cp target/x86_64-unknown-linux-musl/release/healthcheck /out/healthcheck && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-sqlite-maint /out/jbs-sqlite-maint && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-cache-warm /out/jbs-cache-warm && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-ffmpeg-preflight /out/jbs-ffmpeg-preflight
+    cp target/x86_64-unknown-linux-musl/release/jbs-helper /out/jbs-helper
 
 # =========================================================
 # UI build
@@ -902,9 +929,20 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -trimpath \
       -buildvcs=false \
       -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_json embed" \
-      -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}" \
+      -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
       -o /out/navidrome . && \
     file /out/navidrome
+
+# =========================================================
+# Minimal timezone data
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS tzdata-extract
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      tzdata
 
 # =========================================================
 # Runtime
@@ -913,7 +951,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-      optimization="JBS-Navidrome-Ultra-6.0/AMD-EPYC-Zen3/Opus-MP3/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-SafeFallback/RustHelpers-musl/WebP-Artwork/Shell-Entrypoint" \
+      optimization="JBS-Navidrome-Ultra-6.0-Slim-v5/AMD-EPYC-Zen3/Navidrome-master/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-SafeFallback/RustUnifiedHelper-musl-static/Resource-Aware/WebP-Artwork/Shell-Entrypoint" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -922,22 +960,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       zlib1g \
       libstdc++6 \
-      libgcc-s1 \
-      tzdata \
-      grep \
-      musl \
-      file && \
-    rm -rf /var/lib/apt/lists/*
+      libgcc-s1 && \
+    rm -rf \
+      /var/lib/apt/lists/* \
+      /usr/share/doc \
+      /usr/share/man \
+      /usr/share/info \
+      /usr/share/lintian \
+      /usr/share/linda
 
-COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+RUN mkdir -p /usr/share/zoneinfo/Asia
+
+COPY --link --from=tzdata-extract /usr/share/zoneinfo/Asia/Seoul /usr/share/zoneinfo/Asia/Seoul
+
+RUN ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime && \
+    echo "Asia/Seoul" > /etc/timezone
+
+COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
-COPY --link --from=opus-builder /usr/local/lib/libopus.so* /usr/local/lib/
-COPY --link --from=lame-builder /usr/local/lib/libmp3lame.so* /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
-    ldconfig && \
-    mv /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real
+    ldconfig
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
@@ -958,37 +1002,44 @@ SH
 
 RUN chmod 755 /usr/local/bin/ffmpeg
 
-RUN groupadd -g 1000 navidrome && \
-    useradd -u 1000 -g 1000 -M -d /nonexistent -s /usr/sbin/nologin navidrome && \
+RUN printf '%s\n' \
+      'navidrome:x:1000:1000:Navidrome:/nonexistent:/usr/sbin/nologin' \
+      >> /etc/passwd && \
+    printf '%s\n' \
+      'navidrome:x:1000:' \
+      >> /etc/group && \
     install -d -o 1000 -g 1000 -m 755 /app /data /music /cache /cache/tmp && \
     touch /.nddockerenv
 
 COPY --link --chown=1000:1000 --chmod=755 --from=gobuilder /out/navidrome /app/navidrome
 
-COPY --link --chmod=755 --from=rust-builder /out/healthcheck /usr/local/bin/healthcheck
-COPY --link --chmod=755 --from=rust-builder /out/jbs-sqlite-maint /usr/local/bin/jbs-sqlite-maint
-COPY --link --chmod=755 --from=rust-builder /out/jbs-cache-warm /usr/local/bin/jbs-cache-warm
-COPY --link --chmod=755 --from=rust-builder /out/jbs-ffmpeg-preflight /usr/local/bin/jbs-ffmpeg-preflight
+COPY --link --chmod=755 --from=rust-builder /out/jbs-helper /usr/local/bin/jbs-helper
+
+RUN ln -s /usr/local/bin/jbs-helper /usr/local/bin/healthcheck && \
+    ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-sqlite-maint && \
+    ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-cache-warm && \
+    ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-ffmpeg-preflight
 
 # Build-time safe checks only.
 # Do NOT execute Zen3-optimized binaries in GitHub Actions/BuildKit.
 RUN test -x /app/navidrome && \
     test -x /usr/local/bin/ffmpeg.real && \
     test -x /usr/local/bin/ffprobe && \
-    test -x /usr/local/bin/healthcheck && \
-    test -x /usr/local/bin/jbs-sqlite-maint && \
-    test -x /usr/local/bin/jbs-cache-warm && \
-    test -x /usr/local/bin/jbs-ffmpeg-preflight && \
-    file /app/navidrome && \
-    file /usr/local/bin/ffmpeg.real && \
-    file /usr/local/bin/ffprobe && \
-    file /usr/local/bin/healthcheck && \
-    file /usr/local/bin/jbs-sqlite-maint && \
-    file /usr/local/bin/jbs-cache-warm && \
-    file /usr/local/bin/jbs-ffmpeg-preflight && \
-    ldconfig -p | grep -q 'libjemalloc.so.2' && \
-    ldconfig -p | grep -q 'libopus.so' && \
-    ldconfig -p | grep -q 'libmp3lame.so'
+    test -x /usr/local/bin/jbs-helper && \
+    test -L /usr/local/bin/healthcheck && \
+    test -L /usr/local/bin/jbs-sqlite-maint && \
+    test -L /usr/local/bin/jbs-cache-warm && \
+    test -L /usr/local/bin/jbs-ffmpeg-preflight && \
+    libs="$(ldconfig -p)" && \
+    case "$libs" in *libjemalloc.so.2*) : ;; *) echo "missing libjemalloc.so.2" >&2; exit 1 ;; esac && \
+    ffdeps="$(ldd /usr/local/bin/ffmpeg.real 2>/dev/null || true)" && \
+    case "$ffdeps" in \
+      *libopus.so*|*libmp3lame.so*) \
+        echo "ffmpeg is dynamically linked against libopus/libmp3lame; expected static link" >&2; \
+        echo "$ffdeps" >&2; \
+        exit 1 ;; \
+      *) : ;; \
+    esac
 
 RUN cat > /entrypoint <<'SH'
 #!/bin/sh
@@ -1003,6 +1054,198 @@ is_true() {
             return 1
             ;;
     esac
+}
+
+contains() {
+    case "$1" in
+        *"$2"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_auto() {
+    case "${1:-}" in
+        ""|auto|AUTO|Auto)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+valid_uint() {
+    case "${1:-}" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+detect_cpu_cores() {
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r quota period < /sys/fs/cgroup/cpu.max || true
+
+        if valid_uint "${quota:-}" && valid_uint "${period:-}" && [ "$period" -gt 0 ] 2>/dev/null; then
+            cores=$(( (quota + period - 1) / period ))
+            if [ "$cores" -lt 1 ]; then
+                cores=1
+            fi
+            echo "$cores"
+            return 0
+        fi
+    fi
+
+    cores="$(nproc 2>/dev/null || true)"
+    if ! valid_uint "$cores" || [ "$cores" -lt 1 ] 2>/dev/null; then
+        cores=1
+    fi
+
+    echo "$cores"
+}
+
+detect_memory_mib() {
+    if [ -r /sys/fs/cgroup/memory.max ]; then
+        read -r max < /sys/fs/cgroup/memory.max || true
+
+        case "${max:-}" in
+            ""|max|*[!0-9]*)
+                ;;
+            *)
+                if [ "$max" -gt 0 ] 2>/dev/null && [ "$max" -lt 9223372036854771712 ] 2>/dev/null; then
+                    echo $(( max / 1048576 ))
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+
+    while IFS=' ' read -r key value unit; do
+        case "$key" in
+            MemTotal:)
+                if valid_uint "$value"; then
+                    echo $(( value / 1024 ))
+                    return 0
+                fi
+                ;;
+        esac
+    done < /proc/meminfo
+
+    echo 0
+}
+
+cap_uint() {
+    value="$1"
+    min="$2"
+    max="$3"
+
+    if ! valid_uint "$value"; then
+        value="$min"
+    fi
+
+    if [ "$value" -lt "$min" ] 2>/dev/null; then
+        value="$min"
+    fi
+
+    if valid_uint "$max" && [ "$max" -gt 0 ] 2>/dev/null && [ "$value" -gt "$max" ] 2>/dev/null; then
+        value="$max"
+    fi
+
+    echo "$value"
+}
+
+autotune_resources() {
+    if ! is_true "${JBS_AUTOTUNE:-true}"; then
+        return 0
+    fi
+
+    cores="$(detect_cpu_cores)"
+    mem_mib="$(detect_memory_mib)"
+
+    if ! valid_uint "$cores" || [ "$cores" -lt 1 ] 2>/dev/null; then
+        cores=1
+    fi
+
+    if ! valid_uint "$mem_mib"; then
+        mem_mib=0
+    fi
+
+    if is_auto "${GOMAXPROCS:-}"; then
+        max="${JBS_GOMAXPROCS_MAX:-4}"
+        if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
+            max=4
+        fi
+
+        tuned_gmp="$(cap_uint "$cores" 1 "$max")"
+        export GOMAXPROCS="$tuned_gmp"
+    fi
+
+    if is_auto "${FFMPEG_THREADS:-}"; then
+        max="${JBS_FFMPEG_THREADS_MAX:-2}"
+        if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
+            max=2
+        fi
+
+        tuned_ffmpeg=$(( cores / 2 ))
+        if [ "$tuned_ffmpeg" -lt 1 ]; then
+            tuned_ffmpeg=1
+        fi
+
+        tuned_ffmpeg="$(cap_uint "$tuned_ffmpeg" 1 "$max")"
+        export FFMPEG_THREADS="$tuned_ffmpeg"
+    fi
+
+    if is_auto "${GOMEMLIMIT:-}"; then
+        percent="${JBS_GOMEMLIMIT_PERCENT:-70}"
+        min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-256}"
+        max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-6144}"
+
+        if ! valid_uint "$percent" || [ "$percent" -lt 10 ] 2>/dev/null || [ "$percent" -gt 95 ] 2>/dev/null; then
+            percent=70
+        fi
+
+        if ! valid_uint "$min_mib" || [ "$min_mib" -lt 64 ] 2>/dev/null; then
+            min_mib=256
+        fi
+
+        if ! valid_uint "$max_mib" || [ "$max_mib" -lt "$min_mib" ] 2>/dev/null; then
+            max_mib=6144
+        fi
+
+        if [ "$mem_mib" -gt 0 ] 2>/dev/null; then
+            tuned_mem=$(( mem_mib * percent / 100 ))
+        else
+            tuned_mem="$max_mib"
+        fi
+
+        tuned_mem="$(cap_uint "$tuned_mem" "$min_mib" "$max_mib")"
+        export GOMEMLIMIT="${tuned_mem}MiB"
+    fi
+
+    if is_auto "${JBS_CACHE_WARM_LIMIT_MB:-}"; then
+        if [ "$mem_mib" -le 0 ] 2>/dev/null; then
+            warm=256
+        elif [ "$mem_mib" -le 1024 ] 2>/dev/null; then
+            warm=64
+        elif [ "$mem_mib" -le 2048 ] 2>/dev/null; then
+            warm=128
+        elif [ "$mem_mib" -le 4096 ] 2>/dev/null; then
+            warm=256
+        else
+            warm=512
+        fi
+
+        export JBS_CACHE_WARM_LIMIT_MB="$warm"
+    fi
+
+    echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
 }
 
 run_optional() {
@@ -1085,22 +1328,24 @@ ffmpeg_fallback_preflight() {
         return 1
     fi
 
-    /usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 | grep -q 'libopus' || {
+    codecs="$(/usr/local/bin/ffmpeg.real -hide_banner -codecs 2>&1 || true)"
+
+    contains "$codecs" "libopus" || {
         echo "[entrypoint] missing ffmpeg encoder: libopus" >&2
         return 1
     }
 
-    /usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 | grep -q 'libmp3lame' || {
+    contains "$codecs" "libmp3lame" || {
         echo "[entrypoint] missing ffmpeg encoder: libmp3lame" >&2
         return 1
     }
 
-    /usr/local/bin/ffmpeg.real -hide_banner -decoders 2>&1 | grep -q 'alac' || {
+    contains "$codecs" "alac" || {
         echo "[entrypoint] missing ffmpeg decoder: alac" >&2
         return 1
     }
 
-    /usr/local/bin/ffmpeg.real -hide_banner -decoders 2>&1 | grep -q 'mp3' || {
+    contains "$codecs" "mp3" || {
         echo "[entrypoint] missing ffmpeg decoder: mp3" >&2
         return 1
     }
@@ -1108,6 +1353,8 @@ ffmpeg_fallback_preflight() {
     echo "[entrypoint] ffmpeg fallback preflight ok" >&2
     return 0
 }
+
+autotune_resources
 
 if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
     if [ -x /usr/local/bin/jbs-ffmpeg-preflight ]; then
@@ -1164,6 +1411,11 @@ ARG GOMAXPROCS
 ARG GOGC
 ARG SCANSCHEDULE
 ARG FFMPEG_THREADS
+ARG JBS_GOMAXPROCS_MAX
+ARG JBS_FFMPEG_THREADS_MAX
+ARG JBS_GOMEMLIMIT_PERCENT
+ARG JBS_GOMEMLIMIT_MIN_MIB
+ARG JBS_GOMEMLIMIT_MAX_MIB
 
 ENV TZ=Asia/Seoul \
     TMPDIR=/cache/tmp \
@@ -1173,6 +1425,12 @@ ENV TZ=Asia/Seoul \
     GOMEMLIMIT=${GOMEMLIMIT} \
     GODEBUG=netdns=go \
     FFMPEG_THREADS=${FFMPEG_THREADS} \
+    JBS_AUTOTUNE=true \
+    JBS_GOMAXPROCS_MAX=${JBS_GOMAXPROCS_MAX} \
+    JBS_FFMPEG_THREADS_MAX=${JBS_FFMPEG_THREADS_MAX} \
+    JBS_GOMEMLIMIT_PERCENT=${JBS_GOMEMLIMIT_PERCENT} \
+    JBS_GOMEMLIMIT_MIN_MIB=${JBS_GOMEMLIMIT_MIN_MIB} \
+    JBS_GOMEMLIMIT_MAX_MIB=${JBS_GOMEMLIMIT_MAX_MIB} \
     ND_ADDRESS=0.0.0.0 \
     ND_PORT=4533 \
     ND_FFMPEGPATH=/usr/local/bin/ffmpeg \
@@ -1245,7 +1503,7 @@ ENV TZ=Asia/Seoul \
     ND_MAXIMAGEUPLOADSIZE=10MB \
     JBS_SQLITE_MAINT=true \
     JBS_CACHE_WARM=true \
-    JBS_CACHE_WARM_LIMIT_MB=512 \
+    JBS_CACHE_WARM_LIMIT_MB=auto \
     JBS_FFMPEG_PREFLIGHT=true \
     JBS_USE_JEMALLOC=true
 
