@@ -6,7 +6,7 @@
 #
 # Core:
 #   Navidrome master HEAD by default
-#   Go 1.26.4 / Node 24.16.0 LTS / Rust 1.96.0 slim builder
+#   Go 1.26.4 / Node 26.3.0 Current / Rust 1.96.0 slim builder
 #   FFmpeg 8.1.1 / libopus 1.6.1 static / LAME 3.100 static
 #   TagLib 2.3 / jemalloc 5.3.1
 #
@@ -30,9 +30,9 @@
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
-ARG NODE_IMAGE=node:24.16.0-bookworm-slim
-ARG GOLANG_IMAGE=golang:1.26.4-bookworm
-ARG RUST_IMAGE=rust:1.96.0-slim-bookworm
+ARG NODE_IMAGE=node:26.3.0-trixie-slim
+ARG GOLANG_IMAGE=golang:1.26.4-trixie
+ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
 # release fixed: v0.61.2
 # latest commit: master
@@ -431,7 +431,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.0", features = ["bundled"] }
 walkdir = "=2.5.0"
 
 [profile.release]
