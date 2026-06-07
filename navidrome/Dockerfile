@@ -12,15 +12,17 @@
 #
 # Slim v5 changes from 6.0:
 #   - FFmpeg: --enable-cross-compile 제거 → znver3 ASM 최적화 실제 적용
-#   - FFmpeg: LLVM toolchain 명시 (llvm-ar/ranlib/nm/strip) → LTO archive 일관성
+#   - FFmpeg: LLVM toolchain 명시 (llvm-ar/ranlib/nm) → LTO archive 일관성
+#   - FFmpeg: --strip 옵션 제거 (configure 미지원, strip은 별도 RUN으로 처리)
 #   - jemalloc: --with-malloc-conf 빌드타임 embed
-#   - MALLOC_CONF: oversize_threshold 16MB (Zen3 L3 32MB/CCX 기준)
+#   - MALLOC_CONF: oversize_threshold 16MB (Zen3 L3 32MB/CCX 기준), ENV에도 명시
 #   - Rust: lto = "fat" for musl static binary
 #   - TagLib: BUILD_TESTING/EXAMPLES=OFF (CMake 표준 + TagLib 전용 변수 둘 다)
 #   - LAME: --disable-decoder --disable-analyzer-hooks
 #   - Opus: --disable-extra-programs --disable-doc
 #   - Go: -p 플래그 제거
 #   - GODEBUG: madvdontneed=1 추가 (Go heap RSS 반환 방식 조정 → cgroup OOM killer 오탐 감소)
+#   - ENV 블록 내 주석 제거 (Dockerfile 파서 오류 방지)
 #   - wget: --tries=3 추가
 # =========================================================
 
@@ -116,6 +118,8 @@ RUN --mount=type=cache,target=/root/.cache/git \
 # jemalloc
 # --with-malloc-conf: Zen3 기본값 빌드타임 embed
 # oversize_threshold=16777216: Zen3 L3 32MB/CCX 기준
+# 주의: 런타임 MALLOC_CONF ENV가 설정되면 빌드타임 값 전체 교체됨
+#       따라서 MALLOC_CONF ENV에도 동일값 명시 필요
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS jemalloc-builder
@@ -298,8 +302,10 @@ RUN CC="clang -fuse-ld=lld" \
 # =========================================================
 # FFmpeg: Opus / MP3 specialized
 # --enable-cross-compile 제거: 같은 x86_64 호스트 빌드이므로
-# native 경로로 znver3 ASM 최적화 실제 활성화
-# LLVM toolchain 전체 명시: LTO archive 처리 일관성 확보
+#   native 경로로 znver3 ASM 최적화 실제 활성화
+# LLVM toolchain 명시: LTO archive 처리 일관성 확보
+# --strip은 FFmpeg configure 미지원 옵션이므로 제거,
+#   strip은 빌드 후 별도 RUN으로 처리
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
@@ -364,7 +370,6 @@ RUN ./configure \
      --ar=llvm-ar \
      --ranlib=llvm-ranlib \
      --nm=llvm-nm \
-     --strip=llvm-strip \
      --pkg-config=pkg-config \
      --pkg-config-flags=--static \
      --target-os=linux \
@@ -1415,14 +1420,10 @@ ARG JBS_GOMEMLIMIT_MAX_MIB
 
 ENV TZ=Asia/Seoul \
    TMPDIR=/cache/tmp \
-   # oversize_threshold는 jemalloc 빌드타임 --with-malloc-conf에 16MB로 embed됨
-   # 런타임 ENV에서 중복 설정 불필요
-   MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000" \
+   MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000,oversize_threshold:16777216" \
    GOMAXPROCS=${GOMAXPROCS} \
    GOGC=${GOGC} \
    GOMEMLIMIT=${GOMEMLIMIT} \
-   # madvdontneed=1: Go heap의 메모리 반환 시 MADV_DONTNEED 강제
-   # RSS가 실제 Go heap 사용량을 정확히 반영 → cgroup OOM killer 오탐 감소
    GODEBUG=netdns=go,madvdontneed=1 \
    FFMPEG_THREADS=${FFMPEG_THREADS} \
    JBS_AUTOTUNE=true \
