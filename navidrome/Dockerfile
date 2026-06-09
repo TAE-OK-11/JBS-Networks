@@ -12,6 +12,7 @@
 #
 # Slim v5 changes from 6.0:
 #   - Navidrome: v0.62.0 release pinned, master/main/latest/HEAD refused
+#   - Source fetch: explicit refspec checkout for GitHub Actions / BuildKit reliability
 #   - FFmpeg: --enable-cross-compile 제거 → znver3 ASM 최적화 실제 적용
 #   - FFmpeg: LLVM toolchain 명시
 #   - FFmpeg: --strip 옵션 제거, strip은 빌드 후 별도 처리
@@ -97,35 +98,36 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /src
 
 RUN --mount=type=cache,target=/root/.cache/git \
-   set -eu; \
+   set -eux; \
    echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null; \
-   case "${NAVIDROME_REF}" in \
-     ""|master|main|HEAD|latest) \
-       echo "Refusing unstable Navidrome ref: ${NAVIDROME_REF}" >&2; \
+   REF="${NAVIDROME_REF:-v0.62.0}"; \
+   case "$REF" in \
+     master|main|HEAD|latest) \
+       echo "Refusing unstable Navidrome ref: ${REF}" >&2; \
        exit 1; \
        ;; \
    esac; \
+   case "$REF" in \
+     v*) ;; \
+     [0-9]*.[0-9]*.[0-9]*) REF="v${REF}" ;; \
+   esac; \
    git init .; \
    git remote add origin https://github.com/navidrome/navidrome.git; \
-   REF="${NAVIDROME_REF}"; \
-   TAG_REF="${REF}"; \
-   if ! git ls-remote --exit-code --tags origin "${TAG_REF}" >/dev/null 2>&1; then \
-     case "${REF}" in \
-       v*) ;; \
-       *) TAG_REF="v${REF}" ;; \
-     esac; \
-   fi; \
-   if git ls-remote --exit-code --tags origin "${TAG_REF}" >/dev/null 2>&1; then \
-     git fetch --depth=1 origin "refs/tags/${TAG_REF}"; \
-     printf '%s\n' "${TAG_REF}" > /src/.git_tag; \
-   elif git ls-remote --exit-code --heads origin "${REF}" >/dev/null 2>&1; then \
-     git fetch --depth=1 origin "refs/heads/${REF}"; \
+   echo "[source] resolving Navidrome ref: ${REF}" >&2; \
+   if git ls-remote --exit-code --refs origin "refs/tags/${REF}" >/dev/null 2>&1; then \
+     git fetch --depth=1 origin "refs/tags/${REF}:refs/tags/${REF}"; \
+     git checkout --detach "refs/tags/${REF}"; \
+     printf '%s\n' "${REF}" > /src/.git_tag; \
+   elif git ls-remote --exit-code --refs origin "refs/heads/${REF}" >/dev/null 2>&1; then \
+     git fetch --depth=1 origin "refs/heads/${REF}:refs/remotes/origin/${REF}"; \
+     git checkout --detach "refs/remotes/origin/${REF}"; \
      printf '%s\n' "${REF}" > /src/.git_tag; \
    else \
-     echo "Navidrome ref not found: ${NAVIDROME_REF}" >&2; \
+     echo "Navidrome ref not found: ${REF}" >&2; \
+     echo "Recent remote tags:" >&2; \
+     git ls-remote --tags --refs origin | tail -n 20 >&2 || true; \
      exit 1; \
    fi; \
-   git checkout --detach FETCH_HEAD; \
    git rev-parse --short=12 HEAD > /src/.git_sha; \
    rm -rf .git
 
