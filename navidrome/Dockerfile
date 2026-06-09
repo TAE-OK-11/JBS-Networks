@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.1 Slim v5 Resource-Aware Final
+# JBS Networks Navidrome Ultra 6.2(by PiKKY) Slim v5 Resource-Aware Final
 # AMD EPYC Zen3 Dedicated Edition
 #
 # Core:
