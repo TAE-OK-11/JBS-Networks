@@ -9,16 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       navidrome_ref:
-        description: "Navidrome tag/branch/commit to build, e.g. v0.58.0"
+        description: "Navidrome 버전/브랜치/SHA (예: master, 0.62.0, abc1234)"
         type: string
         default: "master"
+      dockerfile_path:
+        description: "사용할 Dockerfile 경로 (repo 기준, 예: navidrome/Dockerfile)"
+        type: string
+        default: "navidrome/Dockerfile"
+      build_context:
+        description: "빌드 컨텍스트 경로 (예: navidrome)"
+        type: string
+        default: "navidrome"
       force_rebuild:
-        description: "Force full rebuild (bypass cache)"
+        description: "캐시 완전 무시하고 전체 재빌드"
         type: boolean
         default: false
+      build_cores:
+        description: "빌드 병렬 코어 수"
+        type: string
+        default: "4"
 
 concurrency:
-  group: jbs-navidrome-build-${{ github.ref }}
+  group: jbs-navidrome-build-${{ github.ref }}-${{ inputs.navidrome_ref || 'auto' }}
   cancel-in-progress: true
 
 permissions:
@@ -29,12 +41,11 @@ env:
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/jbs-navidrome
   DOCKER_BUILD_RECORD_UPLOAD: false
   DOCKER_BUILD_SUMMARY: true
-
-  GOAMD64: v3
-  GOFLAGS: "-trimpath"
-  CGO_CFLAGS: "-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer"
+  GOAMD64:      v3
+  GOFLAGS:      "-trimpath"
+  CGO_CFLAGS:   "-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer"
   CGO_CXXFLAGS: "-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer"
-  RUSTFLAGS: "-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"
+  RUSTFLAGS:    "-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"
 
 jobs:
   build:
@@ -43,11 +54,55 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      # ── 1. 체크아웃 ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # ── 2. 빌드 파라미터 결정 ──────────────────────────────────────────────
+      #    push 트리거 시: Dockerfile의 ARG NAVIDROME_REF 값을 파싱해서 사용
+      #    workflow_dispatch 시: 입력값 우선
+      - name: Resolve build parameters
+        id: params
+        run: |
+          # ── Navidrome REF ──
+          if [[ -n "${{ inputs.navidrome_ref }}" ]]; then
+            ND_REF="${{ inputs.navidrome_ref }}"
+          else
+            # Dockerfile에서 ARG NAVIDROME_REF= 줄 파싱
+            DOCKERFILE="${{ inputs.dockerfile_path || 'navidrome/Dockerfile' }}"
+            ND_REF=$(grep -m1 '^ARG NAVIDROME_REF=' "${DOCKERFILE}" \
+                     | cut -d= -f2 | tr -d '"' | tr -d "'" | xargs)
+            if [[ -z "$ND_REF" ]]; then
+              ND_REF="master"
+            fi
+          fi
+
+          # ── 슬래시/특수문자 → 캐시 키용 safe 문자열 변환 ──
+          ND_REF_SAFE="${ND_REF//\//-}"
+          ND_REF_SAFE="${ND_REF_SAFE//:/-}"
+
+          # ── 기타 파라미터 ──
+          DOCKERFILE="${{ inputs.dockerfile_path || 'navidrome/Dockerfile' }}"
+          BUILD_CTX="${{ inputs.build_context || 'navidrome' }}"
+          BUILD_CORES="${{ inputs.build_cores || '4' }}"
+
+          echo "nd_ref=${ND_REF}"            >> "$GITHUB_OUTPUT"
+          echo "nd_ref_safe=${ND_REF_SAFE}"  >> "$GITHUB_OUTPUT"
+          echo "dockerfile=${DOCKERFILE}"    >> "$GITHUB_OUTPUT"
+          echo "build_ctx=${BUILD_CTX}"      >> "$GITHUB_OUTPUT"
+          echo "build_cores=${BUILD_CORES}"  >> "$GITHUB_OUTPUT"
+
+          echo "### 🔧 Build Parameters" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| NAVIDROME_REF | \`${ND_REF}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dockerfile    | \`${DOCKERFILE}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Context       | \`${BUILD_CTX}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build Cores   | \`${BUILD_CORES}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 3. BuildKit 고정 ───────────────────────────────────────────────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -60,125 +115,60 @@ jobs:
             --debug
             --allow-insecure-entitlement=security.insecure
 
+      # ── 4. Docker Hub 로그인 ───────────────────────────────────────────────
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Navidrome ref가 tag/branch/master여도 실제 upstream commit SHA를 구함
-      - name: Resolve Navidrome upstream ref
-        id: navidrome_ref
-        env:
-          INPUT_NAVIDROME_REF: ${{ inputs.navidrome_ref }}
-        run: |
-          set -euo pipefail
-
-          REMOTE="https://github.com/navidrome/navidrome.git"
-          REF="${INPUT_NAVIDROME_REF:-master}"
-
-          echo "Requested Navidrome ref: ${REF}"
-
-          RESOLVED_REF=""
-          RESOLVED_SHA=""
-
-          # 1) 정확한 tag 확인
-          if git ls-remote --exit-code --tags "$REMOTE" "refs/tags/${REF}" >/dev/null 2>&1; then
-            RESOLVED_REF="${REF}"
-            RESOLVED_SHA="$(git ls-remote "$REMOTE" "refs/tags/${REF}^{}" | awk '{print $1}' | tail -n1)"
-            if [ -z "$RESOLVED_SHA" ]; then
-              RESOLVED_SHA="$(git ls-remote "$REMOTE" "refs/tags/${REF}" | awk '{print $1}' | tail -n1)"
-            fi
-
-          # 2) v prefix 자동 보정: 0.58.0 -> v0.58.0
-          elif [[ "$REF" != v* ]] && git ls-remote --exit-code --tags "$REMOTE" "refs/tags/v${REF}" >/dev/null 2>&1; then
-            RESOLVED_REF="v${REF}"
-            RESOLVED_SHA="$(git ls-remote "$REMOTE" "refs/tags/v${REF}^{}" | awk '{print $1}' | tail -n1)"
-            if [ -z "$RESOLVED_SHA" ]; then
-              RESOLVED_SHA="$(git ls-remote "$REMOTE" "refs/tags/v${REF}" | awk '{print $1}' | tail -n1)"
-            fi
-
-          # 3) branch 확인: master/main 등
-          elif git ls-remote --exit-code --heads "$REMOTE" "refs/heads/${REF}" >/dev/null 2>&1; then
-            RESOLVED_REF="${REF}"
-            RESOLVED_SHA="$(git ls-remote "$REMOTE" "refs/heads/${REF}" | awk '{print $1}' | tail -n1)"
-
-          # 4) commit SHA 직접 입력
-          elif [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
-            RESOLVED_REF="${REF}"
-            RESOLVED_SHA="${REF}"
-
-          else
-            echo "Could not resolve Navidrome ref: ${REF}" >&2
-            exit 1
-          fi
-
-          echo "Resolved Navidrome ref: ${RESOLVED_REF}"
-          echo "Resolved Navidrome SHA: ${RESOLVED_SHA}"
-
-          echo "ref=${RESOLVED_REF}" >> "$GITHUB_OUTPUT"
-          echo "sha=${RESOLVED_SHA}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${RESOLVED_SHA:0:12}" >> "$GITHUB_OUTPUT"
-
-      # 버전/태그/upstream SHA/Dockerfile/workflow 변경이 전부 cache key에 들어감
+      # ── 5. 캐시 bust 키 ────────────────────────────────────────────────────
       - name: Compute cache bust
         id: cache_key
-        env:
-          FORCE_REBUILD: ${{ inputs.force_rebuild }}
-          NAVIDROME_RESOLVED_REF: ${{ steps.navidrome_ref.outputs.ref }}
-          NAVIDROME_RESOLVED_SHA: ${{ steps.navidrome_ref.outputs.sha }}
         run: |
-          set -euo pipefail
-
-          if [[ "${FORCE_REBUILD:-false}" == "true" ]]; then
-            BUST="force-$(date -u +%Y%m%d%H%M%S)"
+          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+            echo "bust=$(date +%s)" >> "$GITHUB_OUTPUT"
           else
-            LOCAL_HASH="$(sha256sum navidrome/Dockerfile .github/workflows/jbs-navidrome-build.yml | sha256sum | awk '{print $1}')"
-            BUST="navidrome-${NAVIDROME_RESOLVED_REF}-${NAVIDROME_RESOLVED_SHA}-${LOCAL_HASH}"
+            echo "bust=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Cache bust: ${BUST}"
-          echo "bust=${BUST}" >> "$GITHUB_OUTPUT"
-
+      # ── 6. 메타데이터 ──────────────────────────────────────────────────────
+      #    버전별 태그: latest(master), 버전 고정 태그(non-master)
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.params.outputs.nd_ref == 'master' && github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-,format=short
-            type=raw,value=master-slim-v5,enable={{is_default_branch}}
-            type=raw,value=navidrome-${{ steps.navidrome_ref.outputs.ref }},enable={{is_default_branch}}
-            type=raw,value=upstream-${{ steps.navidrome_ref.outputs.short_sha }},enable={{is_default_branch}}
+            type=raw,value=${{ steps.params.outputs.nd_ref_safe }},enable=${{ steps.params.outputs.nd_ref != 'master' }}
+            type=raw,value=${{ steps.params.outputs.nd_ref_safe }}-slim-v5,enable=true
           labels: |
             org.opencontainers.image.title=JBS Navidrome Ultra
             org.opencontainers.image.description=JBS Networks Navidrome Ultra Slim Resource-Aware Build
             org.opencontainers.image.vendor=JBS Networks
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.navidrome_ref.outputs.ref }}
-            org.opencontainers.image.source-revision=${{ steps.navidrome_ref.outputs.sha }}
             org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
+            jbs.navidrome.ref=${{ steps.params.outputs.nd_ref }}
 
+      # ── 7. 빌드 & 푸시 ────────────────────────────────────────────────────
+      #    캐시 스코프: base/deps는 버전 독립, build는 버전별 분리
       - name: Build and Push
         uses: docker/build-push-action@v6
         with:
-          context: navidrome
-          file: navidrome/Dockerfile
+          context: ${{ steps.params.outputs.build_ctx }}
+          file:    ${{ steps.params.outputs.dockerfile }}
           push: true
           platforms: linux/amd64
 
-          tags: ${{ steps.meta.outputs.tags }}
+          tags:   ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-          pull: true
-          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}
-
           build-args: |
-            NAVIDROME_REF=${{ steps.navidrome_ref.outputs.ref }}
-            NAVIDROME_UPSTREAM_SHA=${{ steps.navidrome_ref.outputs.sha }}
+            NAVIDROME_REF=${{ steps.params.outputs.nd_ref }}
             NAVIDROME_CACHEBUST=${{ steps.cache_key.outputs.bust }}
-            NAVIDROME_BUILD_CORES=4
+            NAVIDROME_BUILD_CORES=${{ steps.params.outputs.build_cores }}
             GOAMD64_VERSION=v3
             GOFLAGS=-trimpath
             CGO_CFLAGS=-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer
@@ -186,22 +176,26 @@ jobs:
             RUSTFLAGS=-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1
             RUST_TARGET_CPU=znver3
 
+          # 버전 독립 캐시(base/deps) + 버전별 빌드 캐시 분리
           cache-from: |
-            type=gha,scope=jbs-navidrome-build
+            type=gha,scope=jbs-navidrome-base
+            type=gha,scope=jbs-navidrome-deps
+            type=gha,scope=jbs-navidrome-build-${{ steps.params.outputs.nd_ref_safe }}
           cache-to: |
-            type=gha,mode=max,scope=jbs-navidrome-build,ignore-error=true
+            type=gha,mode=max,scope=jbs-navidrome-build-${{ steps.params.outputs.nd_ref_safe }},ignore-error=true
 
           provenance: false
           sbom: false
 
+      # ── 8. 빌드 요약 ───────────────────────────────────────────────────────
       - name: Image digest summary
         run: |
           echo "### 🐳 Build Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | \`${{ env.IMAGE_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Repo SHA | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Navidrome Ref | \`${{ steps.navidrome_ref.outputs.ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Navidrome Upstream SHA | \`${{ steps.navidrome_ref.outputs.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Cache Bust | \`${{ steps.cache_key.outputs.bust }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image           | \`${{ env.IMAGE_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Navidrome REF   | \`${{ steps.params.outputs.nd_ref }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dockerfile      | \`${{ steps.params.outputs.dockerfile }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit SHA      | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tags            | \`${{ steps.meta.outputs.tags }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cache Scope     | \`jbs-navidrome-build-${{ steps.params.outputs.nd_ref_safe }}\` |" >> "$GITHUB_STEP_SUMMARY"
