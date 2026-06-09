@@ -5,25 +5,22 @@
 # AMD EPYC Zen3 Dedicated Edition
 #
 # Core:
-#   Navidrome master HEAD by default
+#   Navidrome v0.62.0 release pinned by default
 #   Go 1.26.4 / Node 26.3.0 Current / Rust 1.96.0 slim builder
 #   FFmpeg 8.1.1 / libopus 1.6.1 static / LAME 3.100 static
 #   TagLib 2.3 / jemalloc 5.3.1
 #
 # Slim v5 changes from 6.0:
+#   - Navidrome: v0.62.0 release pinned, master/main/latest/HEAD refused
 #   - FFmpeg: --enable-cross-compile 제거 → znver3 ASM 최적화 실제 적용
-#   - FFmpeg: LLVM toolchain 명시 (llvm-ar/ranlib/nm) → LTO archive 일관성
-#   - FFmpeg: --strip 옵션 제거 (configure 미지원, strip은 별도 RUN으로 처리)
+#   - FFmpeg: LLVM toolchain 명시
+#   - FFmpeg: --strip 옵션 제거, strip은 빌드 후 별도 처리
 #   - jemalloc: --with-malloc-conf 빌드타임 embed
-#   - MALLOC_CONF: oversize_threshold 16MB (Zen3 L3 32MB/CCX 기준), ENV에도 명시
+#   - MALLOC_CONF: oversize_threshold 16MB
 #   - Rust: lto = "fat" for musl static binary
-#   - TagLib: BUILD_TESTING/EXAMPLES=OFF (CMake 표준 + TagLib 전용 변수 둘 다)
-#   - LAME: --disable-decoder --disable-analyzer-hooks
-#   - Opus: --disable-extra-programs --disable-doc
-#   - Go: -p 플래그 제거
-#   - GODEBUG: madvdontneed=1 추가 (Go heap RSS 반환 방식 조정 → cgroup OOM killer 오탐 감소)
-#   - ENV 블록 내 주석 제거 (Dockerfile 파서 오류 방지)
-#   - wget: --tries=3 추가
+#   - Rust crate: rusqlite 0.40.1
+#   - Runtime: native WebP dlopen용 libwebp/libwebpmux/libwebpdemux 추가
+#   - Navidrome 0.62.0: Transcoding.EnableCancellation 계열 ENV 반영
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -31,7 +28,7 @@ ARG NODE_IMAGE=node:26.3.0-trixie-slim
 ARG GOLANG_IMAGE=golang:1.26.4-trixie
 ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
-ARG NAVIDROME_REF=0.62.0
+ARG NAVIDROME_REF=v0.62.0
 ARG NAVIDROME_CACHEBUST=0
 
 ARG JEMALLOC_VERSION=5.3.1
@@ -100,26 +97,40 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /src
 
 RUN --mount=type=cache,target=/root/.cache/git \
-   echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
-   git init . && \
-   git remote add origin https://github.com/navidrome/navidrome.git && \
-   if git ls-remote --exit-code --heads origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-     git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}"; \
-   elif git ls-remote --exit-code --tags origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-     git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}"; \
+   set -eu; \
+   echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null; \
+   case "${NAVIDROME_REF}" in \
+     ""|master|main|HEAD|latest) \
+       echo "Refusing unstable Navidrome ref: ${NAVIDROME_REF}" >&2; \
+       exit 1; \
+       ;; \
+   esac; \
+   git init .; \
+   git remote add origin https://github.com/navidrome/navidrome.git; \
+   REF="${NAVIDROME_REF}"; \
+   TAG_REF="${REF}"; \
+   if ! git ls-remote --exit-code --tags origin "${TAG_REF}" >/dev/null 2>&1; then \
+     case "${REF}" in \
+       v*) ;; \
+       *) TAG_REF="v${REF}" ;; \
+     esac; \
+   fi; \
+   if git ls-remote --exit-code --tags origin "${TAG_REF}" >/dev/null 2>&1; then \
+     git fetch --depth=1 origin "refs/tags/${TAG_REF}"; \
+     printf '%s\n' "${TAG_REF}" > /src/.git_tag; \
+   elif git ls-remote --exit-code --heads origin "${REF}" >/dev/null 2>&1; then \
+     git fetch --depth=1 origin "refs/heads/${REF}"; \
+     printf '%s\n' "${REF}" > /src/.git_tag; \
    else \
-     git fetch --depth=1 origin "${NAVIDROME_REF}"; \
-   fi && \
-   git checkout --detach FETCH_HEAD && \
-   git rev-parse --short=12 HEAD > /src/.git_sha && \
+     echo "Navidrome ref not found: ${NAVIDROME_REF}" >&2; \
+     exit 1; \
+   fi; \
+   git checkout --detach FETCH_HEAD; \
+   git rev-parse --short=12 HEAD > /src/.git_sha; \
    rm -rf .git
 
 # =========================================================
 # jemalloc
-# --with-malloc-conf: Zen3 기본값 빌드타임 embed
-# oversize_threshold=16777216: Zen3 L3 32MB/CCX 기준
-# 주의: 런타임 MALLOC_CONF ENV가 설정되면 빌드타임 값 전체 교체됨
-#       따라서 MALLOC_CONF ENV에도 동일값 명시 필요
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS jemalloc-builder
@@ -301,11 +312,6 @@ RUN CC="clang -fuse-ld=lld" \
 
 # =========================================================
 # FFmpeg: Opus / MP3 specialized
-# --enable-cross-compile 제거: 같은 x86_64 호스트 빌드이므로
-#   native 경로로 znver3 ASM 최적화 실제 활성화
-# LLVM toolchain 명시: LTO archive 처리 일관성 확보
-# --strip은 FFmpeg configure 미지원 옵션이므로 제거,
-#   strip은 빌드 후 별도 RUN으로 처리
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
@@ -408,7 +414,6 @@ RUN ./configure \
 
 # =========================================================
 # Rust unified helper
-# lto = "fat": musl 정적 바이너리 cross-crate 최적화 최대화
 # =========================================================
 
 FROM ${RUST_IMAGE} AS rust-builder
@@ -436,7 +441,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = { version = "=0.40.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
 walkdir = "=2.5.0"
 
 [profile.release]
@@ -927,13 +932,14 @@ ENV GOAMD64=${GOAMD64_VERSION} \
 RUN --mount=type=cache,target=/root/.cache/go-build \
    --mount=type=cache,target=/go/pkg/mod \
    GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
+   GIT_TAG="$(cat /src/.git_tag 2>/dev/null || echo ${NAVIDROME_REF})" && \
    EXTLDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" && \
    mkdir -p /out && \
    GOOS=linux GOARCH=amd64 go build \
      -trimpath \
      -buildvcs=false \
      -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_json embed" \
-     -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
+     -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${GIT_TAG}" \
      -o /out/navidrome . && \
    file /out/navidrome
 
@@ -955,7 +961,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL maintainer="JBS Networks" \
-     optimization="JBS-Navidrome-Ultra-6.1-Slim-v5/AMD-EPYC-Zen3/Navidrome-master/Opus-MP3-static/FullLTO-FFmpeg-NoCrossCompile-LLVMToolchain/SQLite-Ultra/Jemalloc-BakedConf-16MB/RustFatLTO-musl-static/Resource-Aware/WebP-Artwork/Shell-Entrypoint" \
+     optimization="JBS-Navidrome-Ultra-6.1-Slim-v5/AMD-EPYC-Zen3/Navidrome-v0.62.0/Opus-MP3-static/FullLTO-FFmpeg-NoCrossCompile-LLVMToolchain/SQLite-Ultra/Jemalloc-BakedConf-16MB/RustFatLTO-musl-static/Resource-Aware/WebP-Artwork/Shell-Entrypoint" \
      org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -964,7 +970,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
      ca-certificates \
      zlib1g \
      libstdc++6 \
-     libgcc-s1 && \
+     libgcc-s1 \
+     libwebp7 \
+     libwebpdemux2 \
+     libwebpmux3 && \
    rm -rf \
      /var/lib/apt/lists/* \
      /usr/share/doc \
@@ -984,7 +993,11 @@ COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.re
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
+RUN for lib in libwebp libwebpdemux libwebpmux; do \
+     target="$(find /usr/lib -name "$lib.so.*" 2>/dev/null | head -n 1)"; \
+     if [ -n "$target" ]; then ln -sf "$target" "/usr/local/lib/$lib.so"; fi; \
+   done && \
+   echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
    ldconfig
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
@@ -1033,6 +1046,9 @@ RUN test -x /app/navidrome && \
    test -L /usr/local/bin/jbs-ffmpeg-preflight && \
    libs="$(ldconfig -p)" && \
    case "$libs" in *libjemalloc.so.2*) : ;; *) echo "missing libjemalloc.so.2" >&2; exit 1 ;; esac && \
+   case "$libs" in *libwebp.so*) : ;; *) echo "missing libwebp.so" >&2; exit 1 ;; esac && \
+   case "$libs" in *libwebpdemux.so*) : ;; *) echo "missing libwebpdemux.so" >&2; exit 1 ;; esac && \
+   case "$libs" in *libwebpmux.so*) : ;; *) echo "missing libwebpmux.so" >&2; exit 1 ;; esac && \
    ffdeps="$(ldd /usr/local/bin/ffmpeg.real 2>/dev/null || true)" && \
    case "$ffdeps" in \
      *libopus.so*|*libmp3lame.so*) \
@@ -1453,8 +1469,10 @@ ENV TZ=Asia/Seoul \
    ND_SMARTPLAYLISTREFRESHDELAY=5m \
    ND_MAXSIDEBARPLAYLISTS=50 \
    ND_ENABLEDOWNLOADS=true \
-   ND_ENABLETRANSCODINGCANCELLATION=true \
    ND_ENABLETRANSCODINGCONFIG=true \
+   ND_TRANSCODING_ENABLECANCELLATION=true \
+   ND_TRANSCODING_MAXCONCURRENT=2 \
+   ND_TRANSCODING_MAXCONCURRENTPERUSER=1 \
    ND_AUTOTRANSCODEDOWNLOAD=false \
    ND_DEFAULTDOWNSAMPLINGFORMAT=opus \
    ND_TRANSCODINGCACHESIZE=4096MiB \
@@ -1498,6 +1516,8 @@ ENV TZ=Asia/Seoul \
    ND_ENABLEGRAVATAR=false \
    ND_ENABLELOGREDACTING=true \
    ND_ENABLESHARING=false \
+   ND_ENFORCENONROOTUSER=true \
+   ND_UIPLAYBACKREPORTINTERVAL=1m \
    ND_DEFAULTLANGUAGE=ko \
    ND_DEFAULTTHEME=Dark \
    ND_LOGLEVEL=warn \
