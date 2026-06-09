@@ -15,7 +15,7 @@
 #   - FFmpeg: LLVM toolchain 명시 (llvm-ar/ranlib/nm) → LTO archive 일관성
 #   - FFmpeg: --strip 옵션 제거 (configure 미지원, strip은 별도 RUN으로 처리)
 #   - jemalloc: --with-malloc-conf 빌드타임 embed
-#   - MALLOC_CONF: oversize_threshold 16MB (Zen3 L3 32MB/CCX 기준), ENV에도 명시
+#   - MALLOC_CONF: oversize_threshold 16MB (Zen3 L3 32MB/CCX 기준), ENV에도 명시됨
 #   - Rust: lto = "fat" for musl static binary
 #   - TagLib: BUILD_TESTING/EXAMPLES=OFF (CMake 표준 + TagLib 전용 변수 둘 다)
 #   - LAME: --disable-decoder --disable-analyzer-hooks
