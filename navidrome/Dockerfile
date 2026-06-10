@@ -861,6 +861,7 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
     CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
 
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
@@ -869,11 +870,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     GOOS=linux GOARCH=amd64 go build \
       -trimpath \
       -buildvcs=false \
-      -tags="osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_json embed" \
+      -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_json embed" \
       -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
       -o /out/navidrome . && \
     file /out/navidrome
-
 # =========================================================
 # Timezone data
 # =========================================================
