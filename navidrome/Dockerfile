@@ -7,13 +7,9 @@
 # Final merge:
 #   - Base: v7 operational/security cleanup
 #   - Keep: v6 build-stability fixes
-#   - Keep: v5 performance direction (Zen3, FFmpeg native, static Opus/LAME, TagLib, jemalloc, Rust helper)
-#   - Fix: v0.62.0 config names:
-#       * ND_ENABLETRANSCODINGCANCELLATION -> ND_TRANSCODING_ENABLECANCELLATION
-#       * Add ND_TRANSCODING_MAXCONCURRENT / ND_TRANSCODING_MAXCONCURRENTPERUSER
-#       * Restore ND_UISEARCHDEBOUNCEMS=350 because it exists in v0.62.0 docs
-#   - Keep metadata language fallback: ko,en
-#   - Secrets: Last.fm API key/secret are NOT baked into image; inject at runtime.
+#   - Keep: v5 performance direction
+#   - Fix: npm ci postinstall requires ui/bin/update-workbox.sh before npm ci
+#   - Fix: static .a strip removed; use llvm-ranlib only
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -21,8 +17,6 @@ ARG NODE_IMAGE=node:26.3.0-trixie-slim
 ARG GOLANG_IMAGE=golang:1.26.4-trixie
 ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
-# v0.62.0 pinned by default. To build master HEAD:
-#   --build-arg NAVIDROME_REF=master
 ARG NAVIDROME_REF=v0.62.0
 ARG NAVIDROME_CACHEBUST=0
 
@@ -198,7 +192,7 @@ RUN CC="clang -fuse-ld=lld" \
       --disable-extra-programs \
       --disable-doc && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    llvm-strip -g /usr/local/lib/libopus.a
+    llvm-ranlib /usr/local/lib/libopus.a
 
 # =========================================================
 # LAME MP3 encoder static
@@ -261,7 +255,7 @@ RUN CC="clang -fuse-ld=lld" \
       'Cflags: -I${includedir}' \
       > /usr/local/lib/pkgconfig/libmp3lame.pc && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion libmp3lame && \
-    llvm-strip -g /usr/local/lib/libmp3lame.a
+    llvm-ranlib /usr/local/lib/libmp3lame.a
 
 # =========================================================
 # FFmpeg: Opus / MP3 specialized
@@ -683,7 +677,7 @@ fn capture_ffmpeg(args: &[&str]) -> Result<String, String> {
 }
 
 fn require(haystack: &str, needle: &str, failures: &mut Vec<String>) {
-    if ! haystack.contains(needle) {
+    if !haystack.contains(needle) {
         failures.push(needle.to_string());
     }
 }
@@ -1378,12 +1372,6 @@ ENV TZ=Asia/Seoul \
     JBS_CACHE_WARM_LIMIT_MB=auto \
     JBS_FFMPEG_PREFLIGHT=true \
     JBS_USE_JEMALLOC=true
-
-# SECURITY NOTE:
-# Inject Last.fm secrets at runtime if needed:
-#   docker run --env ND_LASTFM_APIKEY=... --env ND_LASTFM_SECRET=...
-# or use compose env_file.
-# Do not bake secrets into the image.
 
 EXPOSE 4533
 
