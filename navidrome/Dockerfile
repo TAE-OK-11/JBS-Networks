@@ -198,7 +198,7 @@ RUN CC="clang -fuse-ld=lld" \
       --disable-extra-programs \
       --disable-doc && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    strip -g /usr/local/lib/libopus.a
+    llvm-strip -g /usr/local/lib/libopus.a
 
 # =========================================================
 # LAME MP3 encoder static
@@ -261,7 +261,7 @@ RUN CC="clang -fuse-ld=lld" \
       'Cflags: -I${includedir}' \
       > /usr/local/lib/pkgconfig/libmp3lame.pc && \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion libmp3lame && \
-    strip -g /usr/local/lib/libmp3lame.a
+    llvm-strip -g /usr/local/lib/libmp3lame.a
 
 # =========================================================
 # FFmpeg: Opus / MP3 specialized
@@ -683,7 +683,7 @@ fn capture_ffmpeg(args: &[&str]) -> Result<String, String> {
 }
 
 fn require(haystack: &str, needle: &str, failures: &mut Vec<String>) {
-    if !haystack.contains(needle) {
+    if ! haystack.contains(needle) {
         failures.push(needle.to_string());
     }
 }
@@ -784,9 +784,14 @@ FROM ${NODE_IMAGE} AS jsbuilder
 
 WORKDIR /src/ui
 
-COPY --link --from=source /src/ui/package.json /src/ui/package-lock.json* ./
+COPY --link --from=source /src/ui/package.json /src/ui/package-lock.json ./
+COPY --link --from=source /src/ui/bin/ ./bin/
 
 RUN --mount=type=cache,target=/root/.npm \
+    test -s ./bin/update-workbox.sh && \
+    sed -i 's/\r$//' ./bin/update-workbox.sh && \
+    chmod 755 ./bin/update-workbox.sh && \
+    ls -la ./bin && \
     npm ci --prefer-offline --no-audit --fund=false
 
 COPY --link --from=source /src/ui ./
@@ -901,7 +906,7 @@ LABEL org.opencontainers.image.authors="JBS Networks" \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates zlib1g libstdc++6 && \
+      ca-certificates zlib1g libstdc++6 libwebp7 libwebpdemux2 && \
     rm -rf \
       /var/lib/apt/lists/* \
       /usr/share/doc /usr/share/man /usr/share/info \
@@ -919,7 +924,18 @@ COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.re
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
+    ldconfig && \
+    for lib in webp webpdemux; do \
+      target=""; \
+      for cand in /usr/lib/*/lib${lib}.so.* /lib/*/lib${lib}.so.*; do \
+        [ -e "$cand" ] || continue; \
+        target="$cand"; \
+      done; \
+      [ -n "$target" ] || { echo "missing native lib${lib}" >&2; exit 1; }; \
+      ln -sf "$target" "/usr/local/lib/lib${lib}.so"; \
+    done && \
+    ldconfig
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
