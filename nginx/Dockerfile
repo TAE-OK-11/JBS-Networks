@@ -13,11 +13,14 @@
 #  - Cla: PCRE2 static, jemalloc embed conf, zstd CMake IPO, runtime slim
 #  - GS: 안전한 LLD 최적화 일부, epoll 전용, DT_RUNPATH, QUIC host key 아이디어
 #
-# 제외:
-#  - no-PIE / -fno-pie 제외
-#  - 과도한 upstream 모듈 제거 제외
-#  - 위험한 LLVM 옵션 제외
-#  - -funroll-loops 제외
+# 수정 완료:
+#  - AWS-LC Go 누락 수정: builder에 golang 복구
+#  - PCRE2 내부 소스 빌드 제거
+#  - PCRE2 static install 후 nginx에서 -lpcre2-8 링크
+#  - runtime libpcre2-8.so COPY 없음
+#  - heredoc entrypoint 수정
+#  - QUIC host.key preflight 수정
+#  - LD_LIB / LD_NGINX 분리
 #
 # 운영 방향:
 #  - rootless Docker 아님
@@ -148,18 +151,31 @@ RUN set -eux; \
 WORKDIR /tmp
 
 # ---------------------------------------------------------
-# 1) PCRE2 10.47 source
-#    nginx --with-pcre 로 static build-in
-#    nginx 빌드 전까지 /tmp/pcre2-${PCRE2_VERSION} 삭제 금지
+# 1) PCRE2 10.47
+#    static install 방식
+#    NGINX 내부 --with-pcre=/tmp/... 소스 빌드 사용 안 함
 # ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
     echo "${PCRE2_SHA256}  pcre2-${PCRE2_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "pcre2-${PCRE2_VERSION}.tar.gz"; \
-    test -d "/tmp/pcre2-${PCRE2_VERSION}"; \
-    test -f "/tmp/pcre2-${PCRE2_VERSION}/configure"; \
-    echo "[OK] PCRE2 source prepared for static nginx build"
+    cd "pcre2-${PCRE2_VERSION}"; \
+    CFLAGS="${CPU_FLAGS}" \
+    LDFLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--as-needed -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack" \
+    ./configure \
+      --prefix=/usr/local \
+      --enable-jit \
+      --enable-static \
+      --disable-shared \
+      --disable-pcre2-16 \
+      --disable-pcre2-32; \
+    make -j"$(nproc)"; \
+    make install; \
+    test -f /usr/local/lib/libpcre2-8.a; \
+    /usr/local/bin/pcre2-config --version; \
+    ls -la /usr/local/lib/libpcre2-8.a; \
+    rm -rf /tmp/pcre2-${PCRE2_VERSION} /tmp/pcre2-${PCRE2_VERSION}.tar.gz
 
 # ---------------------------------------------------------
 # 2) AWS-LC v5.0.0
@@ -457,8 +473,10 @@ RUN set -eux; \
     cd /tmp/nginx; \
     \
     echo "=== pre-nginx dependency check ==="; \
-    test -d "/tmp/pcre2-${PCRE2_VERSION}"; \
+    test -f /usr/local/lib/libpcre2-8.a; \
+    test -f /usr/local/include/pcre2.h; \
     test -f /usr/local/include/zlib.h; \
+    ls -la /usr/local/lib/libpcre2-8.a; \
     ls -la /usr/local/lib/libz*; \
     ls -la /usr/local/lib/libzstd.so*; \
     ls -la /usr/local/lib/libbrotli*.so*; \
@@ -469,7 +487,7 @@ RUN set -eux; \
     LD_OPT="${LD_NGINX} ${LTO_FLAGS}"; \
     LD_OPT="${LD_OPT} -Wl,-rpath,/opt/awslc/lib:/usr/local/lib"; \
     LD_OPT="${LD_OPT} -L/opt/awslc/lib -L/usr/local/lib"; \
-    LD_OPT="${LD_OPT} -lssl -lcrypto -lz -lzstd"; \
+    LD_OPT="${LD_OPT} -lssl -lcrypto -lpcre2-8 -lz -lzstd"; \
     LD_OPT="${LD_OPT} -lbrotlienc -lbrotlicommon"; \
     \
     ./configure \
@@ -489,8 +507,6 @@ RUN set -eux; \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
-      --with-pcre=/tmp/pcre2-${PCRE2_VERSION} \
-      --with-pcre-opt="--enable-jit --enable-static --disable-shared --disable-pcre2-16 --disable-pcre2-32" \
       --with-pcre-jit \
       --with-threads \
       --with-file-aio \
@@ -562,8 +578,6 @@ RUN set -eux; \
     rm -rf \
       /tmp/nginx \
       /tmp/nginx-${NGINX_VERSION}.tar.gz \
-      /tmp/pcre2-${PCRE2_VERSION} \
-      /tmp/pcre2-${PCRE2_VERSION}.tar.gz \
       /tmp/ngx_brotli \
       /tmp/ngx_http_zstd_module \
       /tmp/nginx-build-version.txt \
