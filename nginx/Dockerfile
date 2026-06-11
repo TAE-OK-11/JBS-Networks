@@ -1,33 +1,30 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.1 - NGINX 1.31.1 Mainline / Network-Optimized Build
-# 기준일: 2026-05-30
+# JBS Networks NGINX 5.3 - CIa Final Patched
+# NGINX 1.31.1 Mainline / AWS-LC 5.0.0 / Znver3 Balanced Build
+# 기준일: 2026-06-11
 #
-# 핵심 방향:
+# Base:
+#  - Cla 5.2 기반
+#
+# 가져온 장점:
+#  - GH: 검증 루틴 / 운영 안정성 / 보수적 모듈 구성
+#  - Cla: PCRE2 static, jemalloc embed conf, zstd CMake IPO, runtime slim
+#  - GS: 안전한 LLD 최적화 일부, epoll 전용, DT_RUNPATH, QUIC host key 아이디어
+#
+# 제외:
+#  - no-PIE / -fno-pie 제외
+#  - 과도한 upstream 모듈 제거 제외
+#  - 위험한 LLVM 옵션 제외
+#  - -funroll-loops 제외
+#
+# 운영 방향:
 #  - rootless Docker 아님
-#  - 컨테이너 / nginx master는 root로 시작
-#  - nginx worker는 nginx.conf의 `user nginx;`로 권한 drop
-#  - setcap 미사용: LD_PRELOAD=jemalloc secure-exec 문제 회피
-#  - USER nginx 미사용: 80/443 바인딩, QUIC, jemalloc 안정성 우선
-#
-# 주요 버전:
-#  - NGINX 1.31.1 Mainline
-#  - AWS-LC v5.0.0
-#  - PCRE2 10.47
-#  - jemalloc 5.3.1
-#  - zlib-rs 0.6.3
-#  - cargo-c 0.10.22
-#  - zstd 1.5.7
-#
-# Dockerfile-only 성능 개선:
-#  - Znver3 전용 최적화
-#  - Clang / LLD / Full LTO
-#  - AWS-LC IPO/LTO 강화
-#  - zlib-rs fat LTO 강화
-#  - Brotli IPO/LTO 강화
-#  - fno-plt / omit-frame-pointer
-#  - reverse proxy 기준 불필요 HTTP 모듈 제거
+#  - nginx master는 root
+#  - nginx worker는 nginx.conf의 user nginx; 로 권한 drop
+#  - setcap 미사용
+#  - LD_PRELOAD jemalloc 유지
 # =========================================================
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
@@ -52,8 +49,30 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -pipe -fstack-protector-strong -D_FORTIFY_SOURCE=3 -ffunction-sections -fdata-sections -fno-semantic-interposition -fno-plt -fomit-frame-pointer -DNDEBUG"
+ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mprefer-vector-width=256 -pipe \
+ -fstack-protector-strong -fstack-clash-protection \
+ -D_FORTIFY_SOURCE=3 \
+ -ffunction-sections -fdata-sections \
+ -fno-semantic-interposition -fno-plt -fomit-frame-pointer \
+ -DNDEBUG"
+
 ARG LTO_FLAGS="-flto=full"
+
+# 보수적 라이브러리용 linker flags
+ARG LD_LIB="-fuse-ld=lld \
+ -Wl,-O2 \
+ -Wl,--as-needed -Wl,--gc-sections \
+ -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+
+# nginx 최종 링크용 linker flags
+ARG LD_NGINX="-fuse-ld=lld \
+ -Wl,-O3 -Wl,--lto-O3 \
+ -Wl,--as-needed -Wl,--gc-sections -Wl,--icf=safe \
+ -Wl,--enable-new-dtags \
+ -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack \
+ -Wl,-z,pack-relative-relocs -Wl,-z,separate-code"
+
+ARG JEMALLOC_MALLOC_CONF="abort_conf:true,background_thread:true,metadata_thp:auto,percpu_arena:phycpu,tcache:true,tcache_max:32768,dirty_decay_ms:30000,muzzy_decay_ms:30000"
 
 # =========================================================
 # Builder
@@ -68,6 +87,7 @@ ARG PCRE2_SHA256
 ARG AWSLC_VERSION
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
+ARG JEMALLOC_MALLOC_CONF
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
 ARG ZSTD_VERSION
@@ -76,6 +96,8 @@ ARG NGX_ZSTD_MODULE_VERSION
 ARG NGX_BROTLI_REF
 ARG CPU_FLAGS
 ARG LTO_FLAGS
+ARG LD_LIB
+ARG LD_NGINX
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -85,6 +107,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     AR=llvm-ar \
     RANLIB=llvm-ranlib \
     NM=llvm-nm \
+    LLVM_AR=llvm-ar \
+    LLVM_RANLIB=llvm-ranlib \
+    LLVM_NM=llvm-nm \
     CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 RUN case "${TARGETARCH:-amd64}" in \
@@ -107,7 +132,6 @@ RUN set -eux; \
       curl \
       file \
       git \
-      golang \
       lld \
       llvm \
       make \
@@ -123,30 +147,22 @@ RUN set -eux; \
 WORKDIR /tmp
 
 # ---------------------------------------------------------
-# 1) PCRE2 10.47
+# 1) PCRE2 10.47 source
+#    nginx --with-pcre 로 static build-in
+#    nginx 빌드 전까지 /tmp/pcre2-${PCRE2_VERSION} 삭제 금지
 # ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
     echo "${PCRE2_SHA256}  pcre2-${PCRE2_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "pcre2-${PCRE2_VERSION}.tar.gz"; \
-    cd "pcre2-${PCRE2_VERSION}"; \
-    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-    LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-    ./configure \
-      --prefix=/usr/local \
-      --enable-jit \
-      --enable-shared \
-      --disable-static \
-      --disable-pcre2-16 \
-      --disable-pcre2-32; \
-    make -j"$(nproc)"; \
-    make install; \
-    strip -s /usr/local/lib/libpcre2-8.so* || true; \
-    /usr/local/bin/pcre2-config --version
+    test -d "/tmp/pcre2-${PCRE2_VERSION}"; \
+    test -f "/tmp/pcre2-${PCRE2_VERSION}/configure"; \
+    echo "[OK] PCRE2 source prepared for static nginx build"
 
 # ---------------------------------------------------------
 # 2) AWS-LC v5.0.0
+#    CMake IPO 사용, CFLAGS에 -flto 중복 삽입하지 않음
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
@@ -159,13 +175,17 @@ RUN set -eux; \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_ASM_COMPILER=clang \
+      -DCMAKE_AR=/usr/bin/llvm-ar \
+      -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
+      -DCMAKE_NM=/usr/bin/llvm-nm \
       -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
+      -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
     ninja -C /tmp/aws-lc/build install; \
+    find /opt/awslc/lib -maxdepth 2 -name '*.a' -delete; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true; \
     \
     test -f /opt/awslc/lib/libssl.so; \
@@ -173,10 +193,6 @@ RUN set -eux; \
     \
     echo "=== AWS-LC library files ==="; \
     ls -la /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so*; \
-    \
-    echo "=== AWS-LC dynamic symbols soft preview ==="; \
-    nm -D /opt/awslc/lib/libssl.so 2>/dev/null | head -n 30 || true; \
-    nm -D /opt/awslc/lib/libcrypto.so 2>/dev/null | head -n 30 || true; \
     \
     echo "=== AWS-LC compile/link/run smoke test ==="; \
     printf '%s\n' \
@@ -195,7 +211,6 @@ RUN set -eux; \
       -lssl -lcrypto; \
     LD_LIBRARY_PATH=/opt/awslc/lib /tmp/awslc_preflight; \
     \
-    echo "=== AWS-LC CLI optional check ==="; \
     if [ -x /opt/awslc/bin/openssl ]; then \
       LD_LIBRARY_PATH=/opt/awslc/lib /opt/awslc/bin/openssl version || true; \
     elif [ -x /opt/awslc/bin/bssl ]; then \
@@ -203,10 +218,12 @@ RUN set -eux; \
     else \
       echo "[AWS-LC] CLI binary not found; compile/link smoke test passed"; \
     fi; \
+    rm -rf /tmp/aws-lc /tmp/awslc_preflight /tmp/awslc_preflight.c; \
     echo "[OK] AWS-LC build and link check passed"
 
 # ---------------------------------------------------------
 # 3) jemalloc 5.3.1
+#    --with-malloc-conf compile-time embed
 # ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
@@ -215,16 +232,18 @@ RUN set -eux; \
     tar -xjf "jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
     cd "jemalloc-${JEMALLOC_VERSION}"; \
     CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-    LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
+    LDFLAGS="${LD_LIB} ${LTO_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
       --disable-stats \
-      --enable-readlinkat; \
+      --enable-readlinkat \
+      --with-malloc-conf="${JEMALLOC_MALLOC_CONF}"; \
     make -j"$(nproc)"; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true; \
-    ls -la /usr/local/lib/libjemalloc.so*
+    ls -la /usr/local/lib/libjemalloc.so*; \
+    rm -rf /tmp/jemalloc-${JEMALLOC_VERSION} /tmp/jemalloc-${JEMALLOC_VERSION}.tar.bz2
 
 # ---------------------------------------------------------
 # 4) cargo-c v0.10.22
@@ -254,7 +273,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C lto=fat -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,--gc-sections"; \
+    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C lto=fat -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O3 -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
     \
     echo "=== zlib-rs installed headers ==="; \
@@ -347,22 +366,41 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     clang -I/usr/local/include -L/usr/local/lib -fuse-ld=lld \
       -o /tmp/zlib_preflight /tmp/zlib_preflight.c -lz; \
     LD_LIBRARY_PATH=/usr/local/lib /tmp/zlib_preflight; \
+    rm -rf /tmp/zlib-rs /tmp/zlib_preflight /tmp/zlib_preflight.c; \
     echo "[OK] zlib-rs compile/link/run preflight passed"
 
 # ---------------------------------------------------------
 # 6) zstd 1.5.7
+#    CMake/Ninja + IPO
 # ---------------------------------------------------------
 RUN set -eux; \
     wget -qO "zstd-${ZSTD_VERSION}.tar.gz" \
       "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
     echo "${ZSTD_SHA256}  zstd-${ZSTD_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "zstd-${ZSTD_VERSION}.tar.gz"; \
-    cd "zstd-${ZSTD_VERSION}"; \
-    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-    LDFLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-    make -j"$(nproc)" install PREFIX=/usr/local; \
+    cmake -S "zstd-${ZSTD_VERSION}/build/cmake" -B /tmp/zstd-build -GNinja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DZSTD_BUILD_STATIC=OFF \
+      -DZSTD_BUILD_SHARED=ON \
+      -DZSTD_BUILD_PROGRAMS=OFF \
+      -DZSTD_BUILD_TESTS=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DCMAKE_C_COMPILER=clang \
+      -DCMAKE_CXX_COMPILER=clang++ \
+      -DCMAKE_AR=/usr/bin/llvm-ar \
+      -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
+      -DCMAKE_NM=/usr/bin/llvm-nm \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
+    ninja -C /tmp/zstd-build install; \
     strip -s /usr/local/lib/libzstd.so* || true; \
-    ls -la /usr/local/lib/libzstd.so*
+    ls -la /usr/local/lib/libzstd.so*; \
+    rm -rf /tmp/zstd-${ZSTD_VERSION} /tmp/zstd-${ZSTD_VERSION}.tar.gz /tmp/zstd-build
 
 # ---------------------------------------------------------
 # 7) ngx_brotli + brotli libs
@@ -381,12 +419,15 @@ RUN set -eux; \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
+      -DCMAKE_AR=/usr/bin/llvm-ar \
+      -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
+      -DCMAKE_NM=/usr/bin/llvm-nm \
       -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
-      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld ${LTO_FLAGS} -Wl,--gc-sections"; \
+      -DCMAKE_C_FLAGS="${CPU_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
     cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
     cmake --install /tmp/ngx_brotli/deps/brotli/out; \
     strip -s /usr/local/lib/libbrotli*.so* || true; \
@@ -413,21 +454,19 @@ RUN set -eux; \
     cd /tmp/nginx; \
     \
     echo "=== pre-nginx dependency check ==="; \
+    test -d "/tmp/pcre2-${PCRE2_VERSION}"; \
     test -f /usr/local/include/zlib.h; \
     ls -la /usr/local/lib/libz*; \
-    ls -la /usr/local/lib/libpcre2-8.so*; \
     ls -la /usr/local/lib/libzstd.so*; \
     ls -la /usr/local/lib/libbrotli*.so*; \
     ls -la /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so*; \
     \
     export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"; \
     \
-    LD_OPT="-fuse-ld=lld ${LTO_FLAGS}"; \
-    LD_OPT="${LD_OPT} -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections"; \
-    LD_OPT="${LD_OPT} -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"; \
+    LD_OPT="${LD_NGINX} ${LTO_FLAGS}"; \
     LD_OPT="${LD_OPT} -Wl,-rpath,/opt/awslc/lib:/usr/local/lib"; \
     LD_OPT="${LD_OPT} -L/opt/awslc/lib -L/usr/local/lib"; \
-    LD_OPT="${LD_OPT} -lssl -lcrypto -lpcre2-8 -lz -lzstd"; \
+    LD_OPT="${LD_OPT} -lssl -lcrypto -lz -lzstd"; \
     LD_OPT="${LD_OPT} -lbrotlienc -lbrotlicommon"; \
     \
     ./configure \
@@ -447,6 +486,8 @@ RUN set -eux; \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
+      --with-pcre=/tmp/pcre2-${PCRE2_VERSION} \
+      --with-pcre-opt="--enable-jit --enable-static --disable-shared --disable-pcre2-16 --disable-pcre2-32" \
       --with-pcre-jit \
       --with-threads \
       --with-file-aio \
@@ -475,6 +516,8 @@ RUN set -eux; \
       --without-http_autoindex_module \
       --without-http_empty_gif_module \
       --without-http_browser_module \
+      --without-poll_module \
+      --without-select_module \
       --add-module=/tmp/ngx_brotli \
       --add-module=/tmp/ngx_http_zstd_module \
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
@@ -502,12 +545,26 @@ RUN set -eux; \
     grep -q -- '--with-pcre-jit' /tmp/nginx-build-version.txt; \
     grep -q -- '--with-threads' /tmp/nginx-build-version.txt; \
     grep -q -- '--with-file-aio' /tmp/nginx-build-version.txt; \
+    grep -q -- '--without-poll_module' /tmp/nginx-build-version.txt; \
+    grep -q -- '--without-select_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_brotli' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_http_zstd_module' /tmp/nginx-build-version.txt; \
     echo "[OK] all required modules/configure flags verified"; \
     \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
-    ! grep -q "not found" /tmp/builder_ldd.txt
+    ! grep -q "not found" /tmp/builder_ldd.txt; \
+    ! grep -qi "libpcre2" /tmp/builder_ldd.txt; \
+    echo "[OK] PCRE2 is not a runtime shared dependency"; \
+    \
+    rm -rf \
+      /tmp/nginx \
+      /tmp/nginx-${NGINX_VERSION}.tar.gz \
+      /tmp/pcre2-${PCRE2_VERSION} \
+      /tmp/pcre2-${PCRE2_VERSION}.tar.gz \
+      /tmp/ngx_brotli \
+      /tmp/ngx_http_zstd_module \
+      /tmp/nginx-build-version.txt \
+      /tmp/builder_ldd.txt
 
 # =========================================================
 # Runtime
@@ -530,7 +587,7 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates \
-      curl; \
+      wget; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -542,14 +599,16 @@ RUN set -eux; \
       || useradd --system --gid nginx --no-log-init --shell /usr/sbin/nologin nginx; \
     fi
 
-COPY --link --from=builder /usr/sbin/nginx /usr/sbin/nginx
-COPY --link --from=builder /etc/nginx /etc/nginx
+COPY --link --from=builder /usr/sbin/nginx              /usr/sbin/nginx
+COPY --link --from=builder /etc/nginx                   /etc/nginx
 
-COPY --link --from=builder /usr/local/lib/libpcre2-8.so*    /usr/local/lib/
 COPY --link --from=builder /usr/local/lib/libjemalloc.so*   /usr/local/lib/
 COPY --link --from=builder /usr/local/lib/libzstd.so*       /usr/local/lib/
 COPY --link --from=builder /usr/local/lib/libbrotli*.so*    /usr/local/lib/
+
 COPY --link --from=builder /usr/local/lib/libz.so.1.0.0     /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libz.so.1         /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libz.so           /usr/local/lib/
 
 COPY --link --from=builder /opt/awslc/lib/libssl.so*        /opt/awslc/lib/
 COPY --link --from=builder /opt/awslc/lib/libcrypto.so*     /opt/awslc/lib/
@@ -567,20 +626,25 @@ RUN set -eux; \
       /var/cache/nginx/uwsgi_temp \
       /var/cache/nginx/scgi_temp \
       /var/cache/nginx/navidrome \
+      /etc/nginx/quic \
       /run; \
     chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx; \
     rm -rf /etc/nginx/logs; \
     ln -sf /var/log/nginx /etc/nginx/logs; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
-    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
-    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
     printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/jbs-custom-libs.conf; \
     ldconfig; \
+    \
+    umask 077; \
+    head -c 32 /dev/urandom > /etc/nginx/quic/host.key; \
+    chmod 600 /etc/nginx/quic/host.key; \
     \
     echo "=== runtime ldd verification ==="; \
     ldd /usr/sbin/nginx | tee /tmp/runtime_ldd.txt; \
     ! grep -q "not found" /tmp/runtime_ldd.txt; \
+    ! grep -qi "libpcre2" /tmp/runtime_ldd.txt; \
+    echo "[OK] PCRE2 is static/built-in"; \
     \
     echo "=== nginx -V ==="; \
     nginx -V; \
@@ -601,16 +665,44 @@ RUN set -eux; \
       && echo "[OK] jemalloc confirmed in running nginx master maps" \
       || { echo "[ERROR] jemalloc not found in running nginx master maps" >&2; nginx -s quit || true; exit 1; }; \
     nginx -s quit; \
-    sleep 0.5
+    sleep 0.5; \
+    rm -f /etc/nginx/quic/host.key /tmp/runtime_ldd.txt
+
+# Runtime entrypoint:
+# - QUIC host key를 이미지 빌드 시 고정하지 않고 컨테이너 시작 시 생성
+# - nginx.conf에서 quic_host_key /etc/nginx/quic/host.key; 사용 시 활용 가능
+RUN cat > /usr/local/bin/jbs-nginx-entrypoint <<'EOF'
+#!/bin/sh
+set -e
+
+if [ "${1#-}" != "$1" ]; then
+  set -- nginx "$@"
+fi
+
+if [ "$1" = "nginx" ]; then
+  mkdir -p /etc/nginx/quic 2>/dev/null || true
+  if [ -d /etc/nginx/quic ] && [ ! -s /etc/nginx/quic/host.key ]; then
+    umask 077
+    head -c 32 /dev/urandom > /etc/nginx/quic/host.key 2>/dev/null || true
+    chmod 600 /etc/nginx/quic/host.key 2>/dev/null || true
+  fi
+fi
+
+exec "$@"
+EOF
+
+RUN chmod +x /usr/local/bin/jbs-nginx-entrypoint
 
 EXPOSE 80 443/tcp 443/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS --max-time 2 http://127.0.0.1/nginx-health -o /dev/null || curl -fsS --max-time 2 http://127.0.0.1/ -o /dev/null || exit 1
+  CMD wget -qO- --max-redirect=0 --timeout=2 http://127.0.0.1/nginx-health > /dev/null 2>&1 \
+      || wget -qO- --max-redirect=0 --timeout=2 http://127.0.0.1/ > /dev/null 2>&1 \
+      || exit 1
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks NGINX 5.1 Latest Mainline" \
+LABEL project="JBS Networks NGINX 5.3 CIa Final Patched" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
@@ -621,6 +713,7 @@ LABEL project="JBS Networks NGINX 5.1 Latest Mainline" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
       runtime.mode="rootful-container-root-master-nginx-workers" \
-      optimization="Znver3/Clang/LLD/Full-LTO/AWS-LC-5.x-IPO/Jemalloc/zlib-rs-fat-LTO/Brotli-IPO/Zstd/HTTP3/ReverseProxy-Trimmed"
+      optimization="Znver3/Clang/LLD/Full-LTO/ICF-Safe/AWS-LC-5.x-IPO/Jemalloc-EmbedConf/zlib-rs-fat-LTO/Brotli-IPO/Zstd-CMake-IPO/PCRE2-Static/HTTP3/ReverseProxy-Trimmed/EpollOnly/StackClash/RUNPATH"
 
+ENTRYPOINT ["/usr/local/bin/jbs-nginx-entrypoint"]
 CMD ["nginx", "-g", "daemon off;"]
