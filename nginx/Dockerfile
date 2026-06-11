@@ -162,7 +162,10 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 2) AWS-LC v5.0.0
-#    CMake IPO 사용, CFLAGS에 -flto 중복 삽입하지 않음
+#    안정성 우선:
+#      - CMake IPO 유지
+#      - CFLAGS에 -flto 중복 삽입하지 않음
+#      - linker flags는 최소화
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
@@ -182,8 +185,8 @@ RUN set -eux; \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
+      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"; \
     ninja -C /tmp/aws-lc/build install; \
     find /opt/awslc/lib -maxdepth 2 -name '*.a' -delete; \
     strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true; \
@@ -209,6 +212,7 @@ RUN set -eux; \
       -Wl,-rpath,/opt/awslc/lib \
       -o /tmp/awslc_preflight /tmp/awslc_preflight.c \
       -lssl -lcrypto; \
+    ldd /tmp/awslc_preflight; \
     LD_LIBRARY_PATH=/opt/awslc/lib /tmp/awslc_preflight; \
     \
     if [ -x /opt/awslc/bin/openssl ]; then \
@@ -220,7 +224,6 @@ RUN set -eux; \
     fi; \
     rm -rf /tmp/aws-lc /tmp/awslc_preflight /tmp/awslc_preflight.c; \
     echo "[OK] AWS-LC build and link check passed"
-
 # ---------------------------------------------------------
 # 3) jemalloc 5.3.1
 #    --with-malloc-conf compile-time embed
