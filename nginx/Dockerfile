@@ -9,7 +9,7 @@
 #  - Cla 5.2 기반
 #
 # 가져온 장점:
-#  - GH: 검증 루틴 / 운영 안정성 / 보수적 모듈 구성
+#  - GH: 검증 루틴 / 운영 안정성 / 보수적 모듈 구성 / AWS-LC용 golang 의존성
 #  - Cla: PCRE2 static, jemalloc embed conf, zstd CMake IPO, runtime slim
 #  - GS: 안전한 LLD 최적화 일부, epoll 전용, DT_RUNPATH, QUIC host key 아이디어
 #
@@ -132,6 +132,7 @@ RUN set -eux; \
       curl \
       file \
       git \
+      golang \
       lld \
       llvm \
       make \
@@ -162,10 +163,8 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 2) AWS-LC v5.0.0
-#    안정성 우선:
-#      - CMake IPO 유지
-#      - CFLAGS에 -flto 중복 삽입하지 않음
-#      - linker flags는 최소화
+#    CMake IPO 사용, CFLAGS에 -flto 중복 삽입하지 않음
+#    AWS-LC v5.0.0은 CMake 단계에서 Go를 요구하므로 builder에 golang 필수
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
@@ -224,6 +223,7 @@ RUN set -eux; \
     fi; \
     rm -rf /tmp/aws-lc /tmp/awslc_preflight /tmp/awslc_preflight.c; \
     echo "[OK] AWS-LC build and link check passed"
+
 # ---------------------------------------------------------
 # 3) jemalloc 5.3.1
 #    --with-malloc-conf compile-time embed
