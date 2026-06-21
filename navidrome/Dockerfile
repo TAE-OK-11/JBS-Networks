@@ -1,15 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.1 Slim v8 Final
+# JBS Networks Navidrome Ultra 6.1 Slim v9
 # AMD EPYC Zen3 Dedicated Edition
 #
-# Final merge:
-#   - Base: v7 operational/security cleanup
-#   - Keep: v6 build-stability fixes
-#   - Keep: v5 performance direction
-#   - Fix: npm ci postinstall requires ui/bin/update-workbox.sh before npm ci
-#   - Fix: static .a strip removed; use llvm-ranlib only
+# v8 → v9 변경사항:
+#   - ffprobe 완전 제거 (taglib extractor 전용, ~10-15MB 절약)
+#   - FFmpeg decoder 정리: aac_fixed(ARM용), mp3float(중복), pcm_f32le(DAW전용) 제거
+#   - libwebp 제거 (ND_ENABLEWEBPENCODING=false, JPEG 대체, ~800KB 절약)
+#   - zlib1g 런타임 제거 + TagLib -DWITH_ZLIB=OFF + CGO_LDFLAGS -lz 제거
+#   - jemalloc --with-malloc-conf 제거 (ENV MALLOC_CONF가 덮어쓰므로 중복)
+#   - ND_DBPATH URI에서 cache=private 제거 (SQLITE_OMIT_SHARED_CACHE 환경에서 무의미)
+#   - ND_ENABLEARTWORKPRECACHE=false (시작 CPU 스파이크 제거)
+#   - ND_SCANNER_WATCHERWAIT=15s (inotify burst CPU 평탄화)
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -129,6 +132,8 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO jemalloc.tar.bz2 \
 
 WORKDIR /build/jemalloc
 
+# --with-malloc-conf 제거: ENV MALLOC_CONF이 항상 우선하므로 compile-time 기본값 불필요.
+# 런타임 MALLOC_CONF ENV로 단일 관리.
 RUN CC="clang -fuse-ld=lld" \
     CXX="clang++ -fuse-ld=lld" \
     AR=llvm-ar \
@@ -141,8 +146,7 @@ RUN CC="clang -fuse-ld=lld" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
-      --disable-stats \
-      --with-malloc-conf="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000,oversize_threshold:16777216" && \
+      --disable-stats && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
@@ -308,6 +312,12 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO ffmpeg.tar.xz \
 
 WORKDIR /build/ffmpeg
 
+# v9 변경:
+#   - --disable-ffprobe: ffprobe 완전 제거 (taglib extractor 전용이므로 미사용)
+#   - decoder 목록에서 제거:
+#       aac_fixed  → ARM fixed-point 구현, znver3(x86_64)에서 불필요
+#       mp3float   → mp3의 float variant, mp3 decoder와 중복
+#       pcm_f32le  → 32-bit float PCM, DAW 전용 포맷으로 일반 음악 라이브러리엔 없음
 RUN ./configure \
       --cc=clang \
       --cxx=clang++ \
@@ -326,7 +336,8 @@ RUN ./configure \
       --disable-debug \
       --disable-doc \
       --disable-ffplay \
-      --enable-ffprobe \
+      --disable-ffprobe \
+      --enable-ffmpeg \
       --disable-everything \
       --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
       --extra-ldflags="-L/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
@@ -336,7 +347,7 @@ RUN ./configure \
       --enable-swresample \
       --enable-protocol=file,pipe \
       --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg \
-      --enable-decoder=alac,aac,aac_fixed,mp3,mp3float,flac,opus,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le \
+      --enable-decoder=alac,aac,mp3,flac,opus,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le \
       --enable-parser=aac,mpegaudio,flac,opus \
       --enable-encoder=libopus,libmp3lame,pcm_s16le \
       --enable-muxer=ogg,opus,mp3,wav \
@@ -346,8 +357,8 @@ RUN ./configure \
       --enable-libmp3lame \
       --prefix=/usr/local && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    strip --strip-unneeded /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    file /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+    strip --strip-unneeded /usr/local/bin/ffmpeg && \
+    file /usr/local/bin/ffmpeg
 
 # =========================================================
 # Rust unified helper
@@ -692,6 +703,7 @@ fn run_ffmpeg_preflight(args: &[String]) -> i32 {
 
     let mut failures = Vec::new();
 
+    // v9: aac_fixed, mp3float, pcm_f32le 제거됨에 따라 preflight 체크 목록도 갱신
     for needle in ["libopus", "libmp3lame", "alac", "aac", "mp3", "flac", "opus"] {
         require(&codecs, needle, &mut failures);
     }
@@ -813,7 +825,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       clang lld llvm make cmake \
-      zlib1g-dev ca-certificates pkg-config \
+      ca-certificates pkg-config \
       wget libutfcpp-dev file
 
 WORKDIR /taglib-build
@@ -831,6 +843,7 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO taglib.tar.gz \
       -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
       -DTAGLIB_BUILD_EXAMPLES=OFF \
       -DTAGLIB_BUILD_TESTS=OFF \
+      -DWITH_ZLIB=OFF \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_AR=llvm-ar \
@@ -852,6 +865,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY --from=source /src ./
 COPY --link --from=jsbuilder /src/ui/build ./ui/build/
 
+# v9: CGO_LDFLAGS에서 -lz 제거 (TagLib -DWITH_ZLIB=OFF로 zlib 의존성 끊음)
+# gobuilder apt에서도 zlib1g-dev 불필요 (v8에서 이미 없었음, 확인용)
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
@@ -859,8 +874,7 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CXX=clang++ \
     CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
-
+    CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lm"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
@@ -874,6 +888,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
       -o /out/navidrome . && \
     file /out/navidrome
+
 # =========================================================
 # Timezone data
 # =========================================================
@@ -891,16 +906,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v8 Final" \
-      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc, Rust helpers" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome - ffprobe removed, libwebp removed, zlib removed, decoder trimmed" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v8/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-BakedConf-16MB/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-ENVConf/RustFatLTO-musl-static/Resource-Aware/No-ffprobe/No-WebP/No-zlib"
 
+# v9: libwebp7, libwebpdemux2 제거 (ND_ENABLEWEBPENCODING=false)
+#     zlib1g 제거 (TagLib -DWITH_ZLIB=OFF)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates zlib1g libstdc++6 libwebp7 libwebpdemux2 && \
+      ca-certificates libstdc++6 && \
     rm -rf \
       /var/lib/apt/lists/* \
       /usr/share/doc /usr/share/man /usr/share/info \
@@ -914,22 +931,14 @@ COPY --link --from=tzdata-extract /usr/share/zoneinfo/Asia/Seoul /usr/share/zone
 RUN ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime && \
     echo "Asia/Seoul" > /etc/timezone
 
+# v9: ffprobe COPY 제거
 COPY --link --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg.real
-COPY --link --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
-    ldconfig && \
-    for lib in webp webpdemux; do \
-      target=""; \
-      for cand in /usr/lib/*/lib${lib}.so.* /lib/*/lib${lib}.so.*; do \
-        [ -e "$cand" ] || continue; \
-        target="$cand"; \
-      done; \
-      [ -n "$target" ] || { echo "missing native lib${lib}" >&2; exit 1; }; \
-      ln -sf "$target" "/usr/local/lib/lib${lib}.so"; \
-    done && \
     ldconfig
+
+# v9: libwebp symlink 로직 전체 제거
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
@@ -957,9 +966,9 @@ RUN ln -s /usr/local/bin/jbs-helper /usr/local/bin/healthcheck && \
     ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-cache-warm && \
     ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-ffmpeg-preflight
 
+# v9: ffprobe 검증 제거, libwebp/zlib 검증 제거
 RUN test -x /app/navidrome && \
     test -x /usr/local/bin/ffmpeg.real && \
-    test -x /usr/local/bin/ffprobe && \
     test -x /usr/local/bin/jbs-helper && \
     test -L /usr/local/bin/healthcheck && \
     test -L /usr/local/bin/jbs-sqlite-maint && \
@@ -1211,7 +1220,8 @@ ffmpeg_fallback_preflight() {
 
     codecs="$(/usr/local/bin/ffmpeg.real -hide_banner -codecs 2>&1 || true)"
 
-    for n in libopus libmp3lame alac mp3; do
+    # v9: aac_fixed, mp3float, pcm_f32le 제거에 맞춰 체크 목록 갱신
+    for n in libopus libmp3lame alac mp3 aac flac; do
         contains "$codecs" "$n" || {
             echo "[entrypoint] missing ffmpeg codec: $n" >&2
             return 1
@@ -1303,12 +1313,12 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-262144&_secure_delete=OFF" \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-262144&_secure_delete=OFF" \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
     ND_SCANNER_SCANONSTARTUP=false \
-    ND_SCANNER_WATCHERWAIT=0s \
+    ND_SCANNER_WATCHERWAIT=15s \
     ND_SCANNER_PURGEMISSING=never \
     ND_SCANNER_FOLLOWSYMLINKS=false \
     ND_SCANNER_EXTRACTOR=taglib \
@@ -1328,13 +1338,13 @@ ENV TZ=Asia/Seoul \
     ND_COVERARTQUALITY=75 \
     ND_UICOVERARTSIZE=300 \
     ND_UISEARCHDEBOUNCEMS=350 \
-    ND_ENABLEWEBPENCODING=true \
+    ND_ENABLEWEBPENCODING=false \
     ND_COVERARTPRIORITY="cover.*,folder.*,front.*,embedded,external" \
     ND_ARTISTARTPRIORITY="artist.*,album/artist.*,external" \
     ND_DISCARTPRIORITY="disc*.*,cd*.*,cover.*,folder.*,front.*,discsubtitle,embedded" \
     ND_LYRICSPRIORITY=".lrc,.txt,embedded" \
     ND_ENABLEMEDIAFILECOVERART=false \
-    ND_ENABLEARTWORKPRECACHE=true \
+    ND_ENABLEARTWORKPRECACHE=false \
     ND_ENABLEARTWORKUPLOAD=true \
     ND_ENABLECOVERANIMATION=false \
     ND_ENABLEREPLAYGAIN=true \
