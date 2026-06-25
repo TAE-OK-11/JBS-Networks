@@ -1,17 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.4 - Low RSS / Low Overhead / Perf Keep
-# NGINX 1.31.2 Mainline / AWS-LC 5.0.0 / Znver3
+# JBS Networks NGINX 5.4 Synergy
+# Low RSS / Low Overhead / Existing nginx.conf Compatible
+#
+# NGINX 1.31.2 Mainline / AWS-LC 5.0.0 / PCRE2 10.47
+# jemalloc direct-link / zlib-rs / brotli / zstd / HTTP3
 #
 # 방향:
-#  - RAM 절약 + 성능 유지
-#  - NGINX runtime overhead 감소
+#  - 기존 conf에서 실제 사용하는 기능 보존
+#  - map / realip / proxy_cache / limit_req / limit_conn / gzip / brotli / zstd / HTTP2 / HTTP3 보존
+#  - thread_pool / aio threads / directio는 conf에서 제거했으므로 빌드에서도 제거
 #  - LD_PRELOAD 제거, jemalloc 직접 링크
-#  - PCRE2 static
-#  - AWS-LC shared + RUNPATH
-#  - threads/file_aio 제거
-#  - root master + nginx worker drop
+#  - 1core/1GB급 VPS 기준 RAM 절약 + 성능 유지
 # =========================================================
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
@@ -56,12 +57,6 @@ ARG LD_NGINX="-fuse-ld=lld \
  -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack \
  -Wl,-z,pack-relative-relocs -Wl,-z,separate-code"
 
-# 성능 유지형 저RSS jemalloc
-# - tcache 유지
-# - percpu_arena 제거
-# - arena 수 제한
-# - decay 5~10초
-# - metadata THP 끔
 ARG JEMALLOC_MALLOC_CONF="abort_conf:true,narenas:2,background_thread:true,metadata_thp:disabled,percpu_arena:disabled,tcache:true,tcache_max:16384,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:4194304,retain:false"
 
 # =========================================================
@@ -159,7 +154,7 @@ RUN set -eux; \
     make install; \
     test -f /usr/local/lib/libpcre2-8.a; \
     /usr/local/bin/pcre2-config --version; \
-    rm -rf /tmp/pcre2-${PCRE2_VERSION} /tmp/pcre2-${PCRE2_VERSION}.tar.gz
+    rm -rf "/tmp/pcre2-${PCRE2_VERSION}" "/tmp/pcre2-${PCRE2_VERSION}.tar.gz"
 
 # ---------------------------------------------------------
 # 2) AWS-LC shared
@@ -226,7 +221,7 @@ RUN set -eux; \
     make install; \
     strip -s /usr/local/lib/libjemalloc.so* || true; \
     test -f /usr/local/lib/libjemalloc.so.2; \
-    rm -rf /tmp/jemalloc-${JEMALLOC_VERSION} /tmp/jemalloc-${JEMALLOC_VERSION}.tar.bz2
+    rm -rf "/tmp/jemalloc-${JEMALLOC_VERSION}" "/tmp/jemalloc-${JEMALLOC_VERSION}.tar.bz2"
 
 # ---------------------------------------------------------
 # 4) cargo-c
@@ -329,7 +324,7 @@ RUN set -eux; \
       -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
     ninja -C /tmp/zstd-build install; \
     strip -s /usr/local/lib/libzstd.so* || true; \
-    rm -rf /tmp/zstd-${ZSTD_VERSION} /tmp/zstd-${ZSTD_VERSION}.tar.gz /tmp/zstd-build
+    rm -rf "/tmp/zstd-${ZSTD_VERSION}" "/tmp/zstd-${ZSTD_VERSION}.tar.gz" /tmp/zstd-build
 
 # ---------------------------------------------------------
 # 7) ngx_brotli + brotli libs
@@ -371,16 +366,12 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 9) NGINX
-#    - PGP verification
-#    - jemalloc direct link
-#    - no LD_PRELOAD
-#    - no threads/file_aio
 # ---------------------------------------------------------
 RUN set -eux; \
     curl -fSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
     curl -fSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc"; \
     mkdir -p /tmp/nginx-keys; \
-    for key in nginx_signing mdounin arut pluknet sb; do \
+    for key in nginx_signing mdounin arut pluknet sb thresh; do \
       curl -fsSL "https://nginx.org/keys/${key}.key" -o "/tmp/nginx-keys/${key}.key" || true; \
     done; \
     gpg --batch --import /tmp/nginx-keys/*.key; \
@@ -427,7 +418,6 @@ RUN set -eux; \
       --with-http_gzip_static_module \
       --with-http_gunzip_module \
       --with-http_slice_module \
-      --with-http_auth_request_module \
       --with-stream \
       --with-stream_ssl_module \
       --with-stream_realip_module \
@@ -442,10 +432,9 @@ RUN set -eux; \
       --without-http_autoindex_module \
       --without-http_empty_gif_module \
       --without-http_browser_module \
-      --without-http_split_clients_module \
       --without-http_referer_module \
-      --without-http_map_module \
       --without-http_geo_module \
+      --without-http_split_clients_module \
       --without-http_mirror_module \
       --without-mail_pop3_module \
       --without-mail_imap_module \
@@ -466,18 +455,23 @@ RUN set -eux; \
     grep -q -- '--with-http_v3_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--with-http_v2_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--with-pcre-jit' /tmp/nginx-build-version.txt; \
+    grep -q -- '--with-http_realip_module' /tmp/nginx-build-version.txt; \
+    grep -q -- '--with-http_gzip_static_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--without-poll_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--without-select_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_brotli' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_http_zstd_module' /tmp/nginx-build-version.txt; \
+    ! grep -q -- '--without-http_map_module' /tmp/nginx-build-version.txt; \
+    ! grep -q -- '--with-threads' /tmp/nginx-build-version.txt; \
+    ! grep -q -- '--with-file-aio' /tmp/nginx-build-version.txt; \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
     ! grep -q "not found" /tmp/builder_ldd.txt; \
     ! grep -qi "libpcre2" /tmp/builder_ldd.txt; \
     grep -qi "jemalloc" /tmp/builder_ldd.txt; \
     rm -rf \
       /tmp/nginx \
-      /tmp/nginx-${NGINX_VERSION}.tar.gz \
-      /tmp/nginx-${NGINX_VERSION}.tar.gz.asc \
+      "/tmp/nginx-${NGINX_VERSION}.tar.gz" \
+      "/tmp/nginx-${NGINX_VERSION}.tar.gz.asc" \
       /tmp/nginx-keys \
       /root/.gnupg \
       /tmp/ngx_brotli \
@@ -533,8 +527,6 @@ COPY --link --from=builder /usr/local/lib/libz.so           /usr/local/lib/
 COPY --link --from=builder /opt/awslc/lib/libssl.so*        /opt/awslc/lib/
 COPY --link --from=builder /opt/awslc/lib/libcrypto.so*     /opt/awslc/lib/
 
-# LD_PRELOAD 제거.
-# jemalloc은 nginx ELF에 직접 DT_NEEDED로 링크됨.
 ENV MALLOC_CONF="${JEMALLOC_MALLOC_CONF}" \
     NGINX_ENTRYPOINT_QUIET_LOGS=1
 
@@ -559,16 +551,12 @@ RUN set -eux; \
     umask 077; \
     head -c 32 /dev/urandom > /etc/nginx/quic/host.key; \
     chmod 600 /etc/nginx/quic/host.key; \
-    echo "=== runtime ldd verification ==="; \
     ldd /usr/sbin/nginx | tee /tmp/runtime_ldd.txt; \
     ! grep -q "not found" /tmp/runtime_ldd.txt; \
     ! grep -qi "libpcre2" /tmp/runtime_ldd.txt; \
     grep -qi "jemalloc" /tmp/runtime_ldd.txt; \
-    echo "=== nginx -V ==="; \
     nginx -V; \
-    echo "=== nginx config test ==="; \
     nginx -t; \
-    echo "=== jemalloc real process maps hard check ==="; \
     nginx; \
     sleep 0.5; \
     NGINX_PID="$(cat /var/run/nginx.pid)"; \
@@ -594,6 +582,8 @@ if [ "$1" = "nginx" ]; then
     head -c 32 /dev/urandom > /etc/nginx/quic/host.key 2>/dev/null || true
     chmod 600 /etc/nginx/quic/host.key 2>/dev/null || true
   fi
+
+  touch /etc/nginx/cloudflare-ips.conf /etc/nginx/bunny-ips.conf 2>/dev/null || true
 fi
 
 exec "$@"
@@ -610,7 +600,7 @@ HEALTHCHECK --interval=60s --timeout=3s --start-period=15s --retries=3 \
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks NGINX 5.4 Low RSS Low Overhead" \
+LABEL project="JBS Networks NGINX 5.4 Synergy" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
@@ -622,6 +612,7 @@ LABEL project="JBS Networks NGINX 5.4 Low RSS Low Overhead" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
       runtime.mode="rootful-container-root-master-nginx-workers" \
       memory.policy="jemalloc-direct-link-low-rss-performance-balanced" \
+      compatibility="keeps-map-realip-proxy-cache-limit-http2-http3-brotli-zstd-gzip" \
       optimization="Znver3/Clang/LLD/Full-LTO/ICF-Safe/AWS-LC-5.0.0/Jemalloc-DirectLink/PCRE2-Static/zlib-rs-fat-LTO/Brotli-IPO/Zstd-CMake-IPO/HTTP3/LowOverhead/EpollOnly/RUNPATH"
 
 ENTRYPOINT ["/usr/local/bin/jbs-nginx-entrypoint"]
