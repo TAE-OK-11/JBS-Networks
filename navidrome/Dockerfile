@@ -1,20 +1,23 @@
-
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.1 Slim v8 Final
+# JBS Networks Navidrome Ultra 6.1 Slim v9 Light Final
 # AMD EPYC Zen3 Dedicated Edition
 #
 # Final merge:
-#   - Base: v7 operational/security cleanup
-#   - Keep: v6 build-stability fixes
-#   - Keep: v5 performance direction
-#   - Fix: npm ci postinstall requires ui/bin/update-workbox.sh before npm ci
-#   - Fix: static .a strip removed; use llvm-ranlib only
+#   - Base: v8 operational/security cleanup
+#   - Update: Node 26.4.0
+#   - Update: FFmpeg 8.1.2
+#   - Update: rusqlite 0.40.1
+#   - Light runtime: lower SQLite cache / mmap
+#   - Light runtime: lower Go memory target
+#   - Light runtime: jemalloc small-server profile
+#   - Light runtime: disable startup cache warm by default
+#   - Light runtime: disable artwork precache by default
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
-ARG NODE_IMAGE=node:26.3.0-trixie-slim
+ARG NODE_IMAGE=node:26.4.0-trixie-slim
 ARG GOLANG_IMAGE=golang:1.26.4-trixie
 ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
@@ -22,7 +25,7 @@ ARG NAVIDROME_REF=v0.62.0
 ARG NAVIDROME_CACHEBUST=0
 
 ARG JEMALLOC_VERSION=5.3.1
-ARG FFMPEG_VERSION=8.1.1
+ARG FFMPEG_VERSION=8.1.2
 ARG OPUS_VERSION=1.6.1
 ARG LAME_VERSION=3.100
 ARG TAGLIB_VERSION=2.3
@@ -31,16 +34,16 @@ ARG NAVIDROME_BUILD_CORES=4
 ARG FFMPEG_THREADS=auto
 ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
-ARG GOGC=125
+ARG GOGC=100
 ARG SCANSCHEDULE=0
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
 
-ARG JBS_GOMAXPROCS_MAX=4
-ARG JBS_FFMPEG_THREADS_MAX=2
-ARG JBS_GOMEMLIMIT_PERCENT=70
-ARG JBS_GOMEMLIMIT_MIN_MIB=256
-ARG JBS_GOMEMLIMIT_MAX_MIB=6144
+ARG JBS_GOMAXPROCS_MAX=2
+ARG JBS_FFMPEG_THREADS_MAX=1
+ARG JBS_GOMEMLIMIT_PERCENT=55
+ARG JBS_GOMEMLIMIT_MIN_MIB=192
+ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
@@ -55,15 +58,15 @@ ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=4096 \
 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
 -DSQLITE_TEMP_STORE=2 \
--DSQLITE_DEFAULT_MMAP_SIZE=268435456 \
--DSQLITE_MAX_MMAP_SIZE=1073741824 \
--DSQLITE_DEFAULT_CACHE_SIZE=-262144 \
+-DSQLITE_DEFAULT_MMAP_SIZE=134217728 \
+-DSQLITE_MAX_MMAP_SIZE=536870912 \
+-DSQLITE_DEFAULT_CACHE_SIZE=-65536 \
 -DSQLITE_DEFAULT_MEMSTATUS=0 \
 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
 -DSQLITE_USE_ALLOCA"
 
 ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
-ARG FFMPEG_SHA256="b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3"
+ARG FFMPEG_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
 ARG OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
 ARG TAGLIB_SHA256="7349f6fd942418bc7009ebe743eb7c9d055f02921ec56fa436ec25007c47fd38"
 ARG LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
@@ -143,7 +146,7 @@ RUN CC="clang -fuse-ld=lld" \
       --prefix=/usr/local \
       --disable-cxx \
       --disable-stats \
-      --with-malloc-conf="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000,oversize_threshold:16777216" && \
+      --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
@@ -379,7 +382,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = { version = "=0.40.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
 walkdir = "=2.5.0"
 
 [profile.release]
@@ -514,7 +517,7 @@ fn run_sqlite_maint(args: &[String]) -> i32 {
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
             PRAGMA temp_store=MEMORY;
-            PRAGMA mmap_size=268435456;
+            PRAGMA mmap_size=134217728;
             PRAGMA analysis_limit=2000;
             PRAGMA optimize=0x10002;
             PRAGMA wal_checkpoint(PASSIVE);
@@ -558,7 +561,7 @@ fn parse_limit_mb(args: &[String]) -> u64 {
     while i < args.len() {
         if args[i] == "--limit-mb" {
             if let Some(v) = args.get(i + 1) {
-                return v.parse::<u64>().unwrap_or(512);
+                return v.parse::<u64>().unwrap_or(32);
             }
         }
         i += 1;
@@ -567,7 +570,7 @@ fn parse_limit_mb(args: &[String]) -> u64 {
     env::var("JBS_CACHE_WARM_LIMIT_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(512)
+        .unwrap_or(32)
 }
 
 fn read_some(path: &Path, remaining: &mut u64, buf: &mut [u8]) {
@@ -633,7 +636,7 @@ fn run_cache_warm(args: &[String]) -> i32 {
         .into_iter()
         .filter_map(Result::ok)
     {
-        if remaining == 0 || seen >= 512 {
+        if remaining == 0 || seen >= 128 {
             break;
         }
 
@@ -862,7 +865,6 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
     CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
 
-
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
@@ -875,6 +877,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
       -o /out/navidrome . && \
     file /out/navidrome
+
 # =========================================================
 # Timezone data
 # =========================================================
@@ -892,11 +895,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v8 Final" \
-      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc, Rust helpers" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc light profile, Rust helpers" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v8/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Ultra/Jemalloc-BakedConf-16MB/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -934,9 +937,9 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
-THREADS=$(printf '%d' "${FFMPEG_THREADS:-2}" 2>/dev/null)
+THREADS=$(printf '%d' "${FFMPEG_THREADS:-1}" 2>/dev/null)
 if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
-    THREADS=2
+    THREADS=1
 fi
 exec /usr/local/bin/ffmpeg.real \
     -nostdin -hide_banner -nostats -loglevel warning \
@@ -1069,17 +1072,17 @@ autotune_resources() {
     fi
 
     if is_auto "${GOMAXPROCS:-}"; then
-        max="${JBS_GOMAXPROCS_MAX:-4}"
+        max="${JBS_GOMAXPROCS_MAX:-2}"
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
-            max=4
+            max=2
         fi
         export GOMAXPROCS="$(cap_uint "$cores" 1 "$max")"
     fi
 
     if is_auto "${FFMPEG_THREADS:-}"; then
-        max="${JBS_FFMPEG_THREADS_MAX:-2}"
+        max="${JBS_FFMPEG_THREADS_MAX:-1}"
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
-            max=2
+            max=1
         fi
         tuned_ffmpeg=$(( cores / 2 ))
         [ "$tuned_ffmpeg" -lt 1 ] && tuned_ffmpeg=1
@@ -1087,20 +1090,20 @@ autotune_resources() {
     fi
 
     if is_auto "${GOMEMLIMIT:-}"; then
-        percent="${JBS_GOMEMLIMIT_PERCENT:-70}"
-        min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-256}"
-        max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-6144}"
+        percent="${JBS_GOMEMLIMIT_PERCENT:-55}"
+        min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-192}"
+        max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-4096}"
 
         if ! valid_uint "$percent" || [ "$percent" -lt 10 ] 2>/dev/null || [ "$percent" -gt 95 ] 2>/dev/null; then
-            percent=70
+            percent=55
         fi
 
         if ! valid_uint "$min_mib" || [ "$min_mib" -lt 64 ] 2>/dev/null; then
-            min_mib=256
+            min_mib=192
         fi
 
         if ! valid_uint "$max_mib" || [ "$max_mib" -lt "$min_mib" ] 2>/dev/null; then
-            max_mib=6144
+            max_mib=4096
         fi
 
         if [ "$mem_mib" -gt 0 ] 2>/dev/null; then
@@ -1114,15 +1117,15 @@ autotune_resources() {
 
     if is_auto "${JBS_CACHE_WARM_LIMIT_MB:-}"; then
         if [ "$mem_mib" -le 0 ] 2>/dev/null; then
-            warm=256
+            warm=32
         elif [ "$mem_mib" -le 1024 ] 2>/dev/null; then
-            warm=64
+            warm=32
         elif [ "$mem_mib" -le 2048 ] 2>/dev/null; then
-            warm=128
+            warm=64
         elif [ "$mem_mib" -le 4096 ] 2>/dev/null; then
-            warm=256
+            warm=128
         else
-            warm=512
+            warm=256
         fi
         export JBS_CACHE_WARM_LIMIT_MB="$warm"
     fi
@@ -1253,9 +1256,9 @@ else
     echo "[entrypoint] jbs-sqlite-maint missing; skipping sqlite startup maintenance" >&2
 fi
 
-if is_true "${JBS_CACHE_WARM:-true}"; then
+if is_true "${JBS_CACHE_WARM:-false}"; then
     if [ -x /usr/local/bin/jbs-cache-warm ]; then
-        run_optional "true" /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-512}"
+        run_optional "true" /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-32}"
     else
         echo "[entrypoint] jbs-cache-warm missing; skipping cache warm" >&2
     fi
@@ -1285,7 +1288,7 @@ ARG JBS_GOMEMLIMIT_MAX_MIB
 
 ENV TZ=Asia/Seoul \
     TMPDIR=/cache/tmp \
-    MALLOC_CONF="background_thread:true,metadata_thp:auto,percpu_arena:percpu,dirty_decay_ms:30000,muzzy_decay_ms:60000,oversize_threshold:16777216" \
+    MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" \
     GOMAXPROCS=${GOMAXPROCS} \
     GOGC=${GOGC} \
     GOMEMLIMIT=${GOMEMLIMIT} \
@@ -1304,7 +1307,7 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-262144&_secure_delete=OFF" \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-65536&_secure_delete=OFF" \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
@@ -1322,20 +1325,20 @@ ENV TZ=Asia/Seoul \
     ND_AUTOTRANSCODEDOWNLOAD=false \
     ND_DEFAULTDOWNSAMPLINGFORMAT=opus \
     ND_TRANSCODING_ENABLECANCELLATION=true \
-    ND_TRANSCODING_MAXCONCURRENT=2 \
+    ND_TRANSCODING_MAXCONCURRENT=1 \
     ND_TRANSCODING_MAXCONCURRENTPERUSER=1 \
-    ND_TRANSCODINGCACHESIZE=4096MiB \
-    ND_IMAGECACHESIZE=768MiB \
+    ND_TRANSCODINGCACHESIZE=2048MiB \
+    ND_IMAGECACHESIZE=256MiB \
     ND_COVERARTQUALITY=75 \
     ND_UICOVERARTSIZE=300 \
     ND_UISEARCHDEBOUNCEMS=350 \
-    ND_ENABLEWEBPENCODING=true \
+    ND_ENABLEWEBPENCODING=false \
     ND_COVERARTPRIORITY="cover.*,folder.*,front.*,embedded,external" \
     ND_ARTISTARTPRIORITY="artist.*,album/artist.*,external" \
     ND_DISCARTPRIORITY="disc*.*,cd*.*,cover.*,folder.*,front.*,discsubtitle,embedded" \
     ND_LYRICSPRIORITY=".lrc,.txt,embedded" \
     ND_ENABLEMEDIAFILECOVERART=false \
-    ND_ENABLEARTWORKPRECACHE=true \
+    ND_ENABLEARTWORKPRECACHE=false \
     ND_ENABLEARTWORKUPLOAD=true \
     ND_ENABLECOVERANIMATION=false \
     ND_ENABLEREPLAYGAIN=true \
@@ -1357,8 +1360,8 @@ ENV TZ=Asia/Seoul \
     ND_ENABLESCROBBLEHISTORY=true \
     ND_PROMETHEUS_ENABLED=false \
     ND_INSPECT_ENABLED=false \
-    ND_PLUGINS_ENABLED=true \
-    ND_PLUGINS_CACHESIZE=200MB \
+    ND_PLUGINS_ENABLED=false \
+    ND_PLUGINS_CACHESIZE=64MB \
     ND_PLUGINS_AUTORELOAD=false \
     ND_JUKEBOX_ENABLED=false \
     ND_ENABLEGRAVATAR=false \
@@ -1369,8 +1372,8 @@ ENV TZ=Asia/Seoul \
     ND_LOGLEVEL=warn \
     ND_MAXIMAGEUPLOADSIZE=10MB \
     JBS_SQLITE_MAINT=true \
-    JBS_CACHE_WARM=true \
-    JBS_CACHE_WARM_LIMIT_MB=auto \
+    JBS_CACHE_WARM=false \
+    JBS_CACHE_WARM_LIMIT_MB=32 \
     JBS_FFMPEG_PREFLIGHT=true \
     JBS_USE_JEMALLOC=true
 
@@ -1378,7 +1381,7 @@ EXPOSE 4533
 
 STOPSIGNAL SIGTERM
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=5s --start-period=75s --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 
 WORKDIR /app
