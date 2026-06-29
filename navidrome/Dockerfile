@@ -23,7 +23,7 @@ ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=ff611374
+ARG NAVIDROME_CACHEBUST=9ee785dc
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -1135,7 +1135,11 @@ autotune_resources() {
         export JBS_CACHE_WARM_LIMIT_MB="$warm"
     fi
 
-    echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
+    if is_auto "${ND_DEVSCANNERTHREADS:-}"; then
+        export ND_DEVSCANNERTHREADS="${GOMAXPROCS:-1}"
+    fi
+
+    echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
 }
 
 check_database_writable() {
@@ -1346,6 +1350,7 @@ ENV TZ=Asia/Seoul \
     JBS_GOMEMLIMIT_PERCENT=${JBS_GOMEMLIMIT_PERCENT} \
     JBS_GOMEMLIMIT_MIN_MIB=${JBS_GOMEMLIMIT_MIN_MIB} \
     JBS_GOMEMLIMIT_MAX_MIB=${JBS_GOMEMLIMIT_MAX_MIB} \
+    ND_DEVSCANNERTHREADS=auto \
     ND_ADDRESS=0.0.0.0 \
     ND_PORT=4533 \
     ND_FFMPEGPATH=/usr/local/bin/ffmpeg \
