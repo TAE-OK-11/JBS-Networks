@@ -1121,7 +1121,7 @@ autotune_resources() {
         if [ "$mem_mib" -le 0 ] 2>/dev/null; then
             warm=32
         elif [ "$mem_mib" -le 1024 ] 2>/dev/null; then
-            warm=32
+            warm=0
         elif [ "$mem_mib" -le 2048 ] 2>/dev/null; then
             warm=64
         elif [ "$mem_mib" -le 4096 ] 2>/dev/null; then
@@ -1133,6 +1133,46 @@ autotune_resources() {
     fi
 
     echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
+}
+
+check_database_writable() {
+    data_dir="${ND_DATAFOLDER:-/data}"
+    if [ -z "$data_dir" ]; then
+        data_dir=/data
+    fi
+
+    if [ ! -d "$data_dir" ]; then
+        echo "[entrypoint] fatal: data directory does not exist: $data_dir" >&2
+        exit 1
+    fi
+
+    if [ ! -w "$data_dir" ]; then
+        echo "[entrypoint] fatal: data directory is not writable by uid=$(id -u): $data_dir" >&2
+        exit 1
+    fi
+
+    tmp="${data_dir}/.jbs-write-test.$$"
+    if ! ( : > "$tmp" ) 2>/dev/null; then
+        echo "[entrypoint] fatal: cannot create files in data directory: $data_dir" >&2
+        exit 1
+    fi
+    rm -f "$tmp"
+
+    db_path="${ND_DBPATH:-${data_dir}/navidrome.db}"
+    case "$db_path" in
+        file:*)
+            db_path="${db_path#file:}"
+            db_path="${db_path%%\?*}"
+            ;;
+        *:memory:*|"")
+            db_path=""
+            ;;
+    esac
+
+    if [ -n "$db_path" ] && [ -e "$db_path" ] && [ ! -w "$db_path" ]; then
+        echo "[entrypoint] fatal: database file is not writable by uid=$(id -u): $db_path" >&2
+        exit 1
+    fi
 }
 
 run_optional() {
@@ -1229,6 +1269,7 @@ ffmpeg_fallback_preflight() {
 }
 
 autotune_resources
+check_database_writable
 
 if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
     if [ -x /usr/local/bin/jbs-ffmpeg-preflight ]; then
@@ -1375,7 +1416,7 @@ ENV TZ=Asia/Seoul \
     ND_MAXIMAGEUPLOADSIZE=10MB \
     JBS_SQLITE_MAINT=true \
     JBS_CACHE_WARM=false \
-    JBS_CACHE_WARM_LIMIT_MB=32 \
+    JBS_CACHE_WARM_LIMIT_MB=auto \
     JBS_FFMPEG_PREFLIGHT=true \
     JBS_USE_JEMALLOC=true
 
