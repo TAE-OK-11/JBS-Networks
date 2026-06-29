@@ -1091,7 +1091,8 @@ autotune_resources() {
         export FFMPEG_THREADS="$(cap_uint "$tuned_ffmpeg" 1 "$max")"
     fi
 
-    if is_auto "${GOMEMLIMIT:-}"; then
+    gmem_limit="${GOMEMLIMIT:-${JBS_GOMEMLIMIT:-}}"
+    if is_auto "$gmem_limit"; then
         percent="${JBS_GOMEMLIMIT_PERCENT:-55}"
         min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-192}"
         max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-4096}"
@@ -1115,6 +1116,8 @@ autotune_resources() {
         fi
 
         export GOMEMLIMIT="$(cap_uint "$tuned_mem" "$min_mib" "$max_mib")MiB"
+    else
+        export GOMEMLIMIT="$gmem_limit"
     fi
 
     if is_auto "${JBS_CACHE_WARM_LIMIT_MB:-}"; then
@@ -1334,7 +1337,7 @@ ENV TZ=Asia/Seoul \
     MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" \
     GOMAXPROCS=${GOMAXPROCS} \
     GOGC=${GOGC} \
-    GOMEMLIMIT=${GOMEMLIMIT} \
+    JBS_GOMEMLIMIT=${GOMEMLIMIT} \
     GODEBUG=netdns=go,madvdontneed=1 \
     FFMPEG_THREADS=${FFMPEG_THREADS} \
     JBS_AUTOTUNE=true \
