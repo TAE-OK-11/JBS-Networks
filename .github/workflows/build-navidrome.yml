@@ -5,9 +5,13 @@ on:
     branches: ["main"]
     paths:
       - "navidrome/**"
-      - ".github/workflows/jbs-navidrome-build.yml"
+      - ".github/workflows/build-navidrome.yml"
   workflow_dispatch:
     inputs:
+      navidrome_repository:
+        description: "Navidrome Git 저장소 URL"
+        type: string
+        default: "https://github.com/TAE-OK-11/navidrome.git"
       navidrome_ref:
         description: "Navidrome 버전/브랜치/SHA (예: master, 0.62.0, abc1234)"
         type: string
@@ -63,7 +67,8 @@ jobs:
       - name: Resolve build parameters
         id: params
         run: |
-          # ── Navidrome REF ──
+          # ── Navidrome repository/ref ──
+          ND_REPO="${{ inputs.navidrome_repository || 'https://github.com/TAE-OK-11/navidrome.git' }}"
           if [[ -n "${{ inputs.navidrome_ref }}" ]]; then
             ND_REF="${{ inputs.navidrome_ref }}"
           else
@@ -82,6 +87,7 @@ jobs:
           BUILD_CTX="${{ inputs.build_context     || 'navidrome' }}"
           BUILD_CORES="${{ inputs.build_cores     || '4' }}"
 
+          echo "nd_repo=${ND_REPO}"          >> "$GITHUB_OUTPUT"
           echo "nd_ref=${ND_REF}"            >> "$GITHUB_OUTPUT"
           echo "nd_ref_safe=${ND_REF_SAFE}"  >> "$GITHUB_OUTPUT"
           echo "dockerfile=${DOCKERFILE}"    >> "$GITHUB_OUTPUT"
@@ -91,6 +97,7 @@ jobs:
           echo "### 🔧 Build Parameters"                         >> "$GITHUB_STEP_SUMMARY"
           echo "| Key | Value |"                                  >> "$GITHUB_STEP_SUMMARY"
           echo "|-----|-------|"                                  >> "$GITHUB_STEP_SUMMARY"
+          echo "| NAVIDROME_REPOSITORY | \`${ND_REPO}\` |"        >> "$GITHUB_STEP_SUMMARY"
           echo "| NAVIDROME_REF | \`${ND_REF}\` |"               >> "$GITHUB_STEP_SUMMARY"
           echo "| Dockerfile    | \`${DOCKERFILE}\` |"           >> "$GITHUB_STEP_SUMMARY"
           echo "| Context       | \`${BUILD_CTX}\` |"            >> "$GITHUB_STEP_SUMMARY"
@@ -159,6 +166,7 @@ jobs:
 
           build-args: |
             NAVIDROME_REF=${{ steps.params.outputs.nd_ref }}
+            NAVIDROME_REPOSITORY=${{ steps.params.outputs.nd_repo }}
             NAVIDROME_CACHEBUST=${{ steps.cache_key.outputs.bust }}
             NAVIDROME_BUILD_CORES=${{ steps.params.outputs.build_cores }}
             GOAMD64_VERSION=v3

@@ -21,7 +21,8 @@ ARG NODE_IMAGE=node:26.4.0-trixie-slim
 ARG GOLANG_IMAGE=golang:1.26.4-trixie
 ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
-ARG NAVIDROME_REF=v0.62.0
+ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
+ARG NAVIDROME_REF=master
 ARG NAVIDROME_CACHEBUST=0
 
 ARG JEMALLOC_VERSION=5.3.1
@@ -78,6 +79,7 @@ ARG LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1
 FROM ${DEBIAN_IMAGE} AS source
 
 ARG NAVIDROME_REF
+ARG NAVIDROME_REPOSITORY
 ARG NAVIDROME_CACHEBUST
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -91,7 +93,7 @@ WORKDIR /src
 
 RUN echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
     git init . && \
-    git remote add origin https://github.com/navidrome/navidrome.git && \
+    git remote add origin "${NAVIDROME_REPOSITORY}" && \
     if git ls-remote --exit-code --heads origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
       git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}"; \
     elif git ls-remote --exit-code --tags origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
