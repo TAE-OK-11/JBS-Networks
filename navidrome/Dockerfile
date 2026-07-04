@@ -2,17 +2,13 @@
 
 # =========================================================
 # JBS Networks Navidrome Ultra 6.1 Slim v9 Light Final
-# AMD EPYC Zen4 Dedicated Edition
+# AMD EPYC Zen3 Dedicated Edition
 #
 # Final merge:
 #   - Base: v8 operational/security cleanup
 #   - Update: Node 26.4.0
 #   - Update: FFmpeg 8.1.2
 #   - Update: rusqlite 0.40.1
-#   - Zen4 dedicated: GOAMD64 v4
-#   - Zen4 dedicated: Rust target-cpu znver4
-#   - Zen4 dedicated: FFmpeg cpu znver4
-#   - Zen4 dedicated: x86-64-v4 runtime CPU guard
 #   - Light runtime: lower SQLite cache / mmap
 #   - Light runtime: lower Go memory target
 #   - Light runtime: jemalloc small-server profile
@@ -41,8 +37,8 @@ ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
 ARG GOGC=100
 ARG SCANSCHEDULE=0
-ARG GOAMD64_VERSION=v4
-ARG RUST_TARGET_CPU=znver4
+ARG GOAMD64_VERSION=v3
+ARG RUST_TARGET_CPU=znver3
 
 ARG JBS_GOMAXPROCS_MAX=2
 ARG JBS_FFMPEG_THREADS_MAX=1
@@ -50,7 +46,7 @@ ARG JBS_GOMEMLIMIT_PERCENT=55
 ARG JBS_GOMEMLIMIT_MIN_MIB=192
 ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver4 -mtune=znver4 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
 ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
@@ -328,7 +324,7 @@ RUN ./configure \
       --pkg-config-flags=--static \
       --target-os=linux \
       --arch=x86_64 \
-      --cpu=znver4 \
+      --cpu=znver3 \
       --disable-runtime-cpudetect \
       --enable-hardcoded-tables \
       --disable-autodetect \
@@ -901,11 +897,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final Zen4" \
-      org.opencontainers.image.description="AMD EPYC Zen4 optimized Navidrome with static Opus/MP3, jemalloc light profile, Rust helpers" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc light profile, Rust helpers" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen4/GOAMD64-v4/Opus-MP3-static/FullLTO-FFmpeg-Znver4/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static-Znver4/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -993,24 +989,6 @@ is_true() { case "${1:-}" in 1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;; 
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 is_auto() { case "${1:-}" in ""|auto|AUTO|Auto) return 0 ;; *) return 1 ;; esac; }
 valid_uint() { case "${1:-}" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-
-check_x86_64_v4_cpu() {
-    if ! is_true "${JBS_REQUIRE_X86_64_V4:-true}"; then
-        return 0
-    fi
-
-    flags="$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null || true)"
-
-    for f in avx512f avx512bw avx512cd avx512dq avx512vl; do
-        contains "$flags" "$f" || {
-            echo "[entrypoint] fatal: this image requires x86-64-v4 / Zen4-class AVX-512 CPU flag: missing $f" >&2
-            echo "[entrypoint] fatal: use a Zen3/GOAMD64=v3 build on older EPYC or AVX-512-masked VPS" >&2
-            exit 132
-        }
-    done
-
-    echo "[entrypoint] x86-64-v4 CPU check passed" >&2
-}
 
 detect_cpu_cores() {
     if [ -r /sys/fs/cgroup/cpu.max ]; then
@@ -1297,7 +1275,6 @@ ffmpeg_fallback_preflight() {
     return 0
 }
 
-check_x86_64_v4_cpu
 autotune_resources
 check_database_writable
 
@@ -1368,7 +1345,6 @@ ENV TZ=Asia/Seoul \
     GODEBUG=netdns=go,madvdontneed=1 \
     FFMPEG_THREADS=${FFMPEG_THREADS} \
     JBS_AUTOTUNE=true \
-    JBS_REQUIRE_X86_64_V4=true \
     JBS_GOMAXPROCS_MAX=${JBS_GOMAXPROCS_MAX} \
     JBS_FFMPEG_THREADS_MAX=${JBS_FFMPEG_THREADS_MAX} \
     JBS_GOMEMLIMIT_PERCENT=${JBS_GOMEMLIMIT_PERCENT} \
