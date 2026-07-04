@@ -1,18 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.4 Synergy
-# Low RSS / Low Overhead / Existing nginx.conf Compatible
-#
-# NGINX 1.31.2 Mainline / AWS-LC 5.0.0 / PCRE2 10.47
-# jemalloc direct-link / zlib-rs / brotli / zstd / HTTP3
+# JBS Networks NGINX 5.4 Synergy Lite v3
+# Target: 1 vCPU / 1GB RAM / AMD EPYC Zen1
 #
 # 방향:
-#  - 기존 conf에서 실제 사용하는 기능 보존
-#  - map / realip / proxy_cache / limit_req / limit_conn / gzip / brotli / zstd / HTTP2 / HTTP3 보존
-#  - thread_pool / aio threads / directio는 conf에서 제거했으므로 빌드에서도 제거
+#  - Zen1 최적화: znver3 제거, znver1 + 128-bit vector 선호
+#  - Low RSS: jemalloc arena/tcache/decay 축소
+#  - Low binary surface: 미사용 stream/slice/gunzip/stub_status 제거
+#  - 미사용 CDN 관련 설정 제거
+#  - Cloudflare real-ip include는 유지
+#  - map / realip / proxy_cache / limit_req / limit_conn / gzip / brotli / zstd / HTTP2 / HTTP3 유지
+#  - thread_pool / aio threads / directio 미사용
 #  - LD_PRELOAD 제거, jemalloc 직접 링크
-#  - 1core/1GB급 VPS 기준 RAM 절약 + 성능 유지
 # =========================================================
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
@@ -27,7 +27,7 @@ ARG AWSLC_VERSION=v5.1.0
 ARG JEMALLOC_VERSION=5.3.1
 ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
 
-ARG ZLIBRS_VERSION=v0.6.3
+ARG ZLIBRS_VERSION=v0.6.5
 ARG CARGOC_VERSION=v0.10.23
 
 ARG ZSTD_VERSION=1.5.7
@@ -36,14 +36,17 @@ ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-ARG CPU_FLAGS="-O3 -march=znver3 -mtune=znver3 -mprefer-vector-width=256 -pipe \
+# Zen1/Naples용: znver3는 제거.
+# Zen1은 256-bit AVX를 내부적으로 128-bit로 처리하는 편이라 128-bit vector 선호.
+ARG CPU_FLAGS="-O2 -march=znver1 -mtune=znver1 -mprefer-vector-width=128 -pipe \
  -fstack-protector-strong -fstack-clash-protection \
  -D_FORTIFY_SOURCE=3 \
  -ffunction-sections -fdata-sections \
  -fno-semantic-interposition -fno-plt -fomit-frame-pointer \
  -DNDEBUG"
 
-ARG LTO_FLAGS="-flto=full"
+# Full LTO보다 Thin LTO가 빌드 RAM/시간을 덜 먹고, 런타임 차이는 이 용도에서 작음.
+ARG LTO_FLAGS="-flto=thin"
 
 ARG LD_LIB="-fuse-ld=lld \
  -Wl,-O2 \
@@ -51,13 +54,14 @@ ARG LD_LIB="-fuse-ld=lld \
  -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
 
 ARG LD_NGINX="-fuse-ld=lld \
- -Wl,-O3 -Wl,--lto-O3 \
+ -Wl,-O2 -Wl,--lto-O2 \
  -Wl,--as-needed -Wl,--gc-sections -Wl,--icf=safe \
  -Wl,--enable-new-dtags \
  -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack \
  -Wl,-z,pack-relative-relocs -Wl,-z,separate-code"
 
-ARG JEMALLOC_MALLOC_CONF="abort_conf:true,narenas:2,background_thread:true,metadata_thp:disabled,percpu_arena:disabled,tcache:true,tcache_max:16384,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:4194304,retain:false"
+# 1 worker / 1 vCPU 기준 저RSS 설정.
+ARG JEMALLOC_MALLOC_CONF="abort_conf:true,narenas:1,background_thread:false,metadata_thp:disabled,percpu_arena:disabled,tcache:true,tcache_max:8192,dirty_decay_ms:1000,muzzy_decay_ms:5000,oversize_threshold:1048576,retain:false"
 
 # =========================================================
 # Builder
@@ -97,8 +101,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 RUN case "${TARGETARCH:-amd64}" in \
-      amd64|"") echo "Building for amd64 / znver3";; \
-      *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/znver3 only." >&2; exit 1;; \
+      amd64|"") echo "Building for amd64 / znver1";; \
+      *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/Zen1 only." >&2; exit 1;; \
     esac
 
 RUN set -eux; \
@@ -114,7 +118,6 @@ RUN set -eux; \
       clang \
       cmake \
       curl \
-      file \
       git \
       gnupg \
       golang \
@@ -158,6 +161,7 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 2) AWS-LC shared
+# AWS-LC standalone build requires Go; keep golang in builder deps.
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
@@ -251,7 +255,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    export RUSTFLAGS="-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1 -C lto=fat -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O3 -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe"; \
+    export RUSTFLAGS="-C target-cpu=znver1 -C opt-level=3 -C codegen-units=1 -C lto=thin -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe"; \
     cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
     if [ ! -f /usr/local/include/zlib.h ]; then \
       SRC_ZLIB_H="$(find /tmp/zlib-rs -type f -name 'zlib.h' | head -n1)"; \
@@ -414,14 +418,7 @@ RUN set -eux; \
       --with-http_v2_module \
       --with-http_v3_module \
       --with-http_realip_module \
-      --with-http_stub_status_module \
       --with-http_gzip_static_module \
-      --with-http_gunzip_module \
-      --with-http_slice_module \
-      --with-stream \
-      --with-stream_ssl_module \
-      --with-stream_realip_module \
-      --with-stream_ssl_preread_module \
       --without-http_fastcgi_module \
       --without-http_uwsgi_module \
       --without-http_scgi_module \
@@ -429,6 +426,7 @@ RUN set -eux; \
       --without-http_memcached_module \
       --without-http_ssi_module \
       --without-http_userid_module \
+      --without-http_auth_basic_module \
       --without-http_autoindex_module \
       --without-http_empty_gif_module \
       --without-http_browser_module \
@@ -459,11 +457,13 @@ RUN set -eux; \
     grep -q -- '--with-http_gzip_static_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--without-poll_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--without-select_module' /tmp/nginx-build-version.txt; \
+    grep -q -- '--without-http_auth_basic_module' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_brotli' /tmp/nginx-build-version.txt; \
     grep -q -- '--add-module=/tmp/ngx_http_zstd_module' /tmp/nginx-build-version.txt; \
     ! grep -q -- '--without-http_map_module' /tmp/nginx-build-version.txt; \
     ! grep -q -- '--with-threads' /tmp/nginx-build-version.txt; \
     ! grep -q -- '--with-file-aio' /tmp/nginx-build-version.txt; \
+    ! grep -q -- '--with-stream' /tmp/nginx-build-version.txt; \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
     ! grep -q "not found" /tmp/builder_ldd.txt; \
     ! grep -qi "libpcre2" /tmp/builder_ldd.txt; \
@@ -583,7 +583,8 @@ if [ "$1" = "nginx" ]; then
     chmod 600 /etc/nginx/quic/host.key 2>/dev/null || true
   fi
 
-  touch /etc/nginx/cloudflare-ips.conf /etc/nginx/bunny-ips.conf 2>/dev/null || true
+  # Cloudflare real-ip 파일만 호환용으로 생성.
+  touch /etc/nginx/cloudflare-ips.conf 2>/dev/null || true
 fi
 
 exec "$@"
@@ -600,7 +601,7 @@ HEALTHCHECK --interval=60s --timeout=3s --start-period=15s --retries=3 \
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks NGINX 5.4 Synergy" \
+LABEL project="JBS Networks NGINX 5.4 Synergy Lite v3" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
@@ -611,9 +612,9 @@ LABEL project="JBS Networks NGINX 5.4 Synergy" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
       runtime.mode="rootful-container-root-master-nginx-workers" \
-      memory.policy="jemalloc-direct-link-low-rss-performance-balanced" \
-      compatibility="keeps-map-realip-proxy-cache-limit-http2-http3-brotli-zstd-gzip" \
-      optimization="Znver3/Clang/LLD/Full-LTO/ICF-Safe/AWS-LC-5.0.0/Jemalloc-DirectLink/PCRE2-Static/zlib-rs-fat-LTO/Brotli-IPO/Zstd-CMake-IPO/HTTP3/LowOverhead/EpollOnly/RUNPATH"
+      memory.policy="zen1-1vcpu-1gb-jemalloc-direct-link-low-rss" \
+      compatibility="keeps-map-realip-proxy-cache-limit-http2-http3-brotli-zstd-gzip-cloudflare-realip" \
+      optimization="Zen1/Clang/LLD/ThinLTO/AWS-LC-5.1.0/Jemalloc-DirectLink/PCRE2-Static/zlib-rs-0.6.5/Brotli/Zstd/HTTP3/LowOverhead/EpollOnly/NoStream/NoThreads/NoAIO"
 
 ENTRYPOINT ["/usr/local/bin/jbs-nginx-entrypoint"]
 CMD ["nginx", "-g", "daemon off;"]
