@@ -1,15 +1,26 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Official v0.62.0 Zen4 Lite v11
-# AMD EPYC Zen4 / 1 vCPU / 1GB RAM Edition
+# JBS Networks Navidrome Official v0.62.0 Zen4 Lite v11.1
+# AMD EPYC Zen4 / 1 vCPU / 1GB RAM Balanced Edition
 #
-# Goals:
-#   - Official-current dependency line where safe
-#   - Zen4 runtime target: GOAMD64=v4 / znver4 C/Rust/FFmpeg
-#   - 1-core stability: ffmpeg/transcoding/scanner concurrency capped
-#   - 1GB balanced memory: not ultra-conservative, still avoids swap spikes
-#   - Keep existing Navidrome behavior and helper tooling
+# Base:
+#   - Official Navidrome source, pinned stable release tag
+#   - Node 26.4.0
+#   - Go 1.26.4
+#   - Rust 1.96.0
+#   - FFmpeg 8.1.2
+#   - rusqlite 0.40.1
+#
+# Direction:
+#   - Official Navidrome release instead of fork/master
+#   - Zen4-specific build target
+#   - 1 vCPU concurrency limit
+#   - 1GB RAM balanced, not extreme memory saving
+#   - Static Opus/MP3 FFmpeg build
+#   - jemalloc runtime preload with safe fallback
+#   - Startup cache warm disabled by default
+#   - Artwork precache disabled by default
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -19,7 +30,7 @@ ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
 ARG NAVIDROME_REPOSITORY=https://github.com/navidrome/navidrome.git
 ARG NAVIDROME_REF=v0.62.0
-ARG NAVIDROME_CACHEBUST=official-v0.62.0-zen4-v11
+ARG NAVIDROME_CACHEBUST=official-v0.62.0-zen4-v11.1
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -27,17 +38,13 @@ ARG OPUS_VERSION=1.6.1
 ARG LAME_VERSION=3.100
 ARG TAGLIB_VERSION=2.3
 
-# For building on a 1-core VPS, 2 is a safer default than 4.
-# Override with --build-arg NAVIDROME_BUILD_CORES=4 in GitHub Actions if desired.
 ARG NAVIDROME_BUILD_CORES=2
-
 ARG FFMPEG_THREADS=auto
 ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
 ARG GOGC=125
 ARG SCANSCHEDULE=0
 
-# Zen4-only runtime image. Do not run this on Zen1/Zen2/Zen3.
 ARG GOAMD64_VERSION=v4
 ARG RUST_TARGET_CPU=znver4
 ARG FFMPEG_CPU=znver4
@@ -51,9 +58,8 @@ ARG JBS_GOMEMLIMIT_MAX_MIB=768
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver4 -mtune=znver4 -mprefer-vector-width=256 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
-ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,-z,noexecstack"
+ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
 
-# Balanced SQLite profile for 1GB RAM: cache is bigger than ultra-light, but still sane.
 ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_ENABLE_FTS5 \
 -DSQLITE_ENABLE_STAT4 \
@@ -63,7 +69,7 @@ ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
 -DSQLITE_TEMP_STORE=2 \
 -DSQLITE_DEFAULT_MMAP_SIZE=268435456 \
--DSQLITE_MAX_MMAP_SIZE=1073741824 \
+-DSQLITE_MAX_MMAP_SIZE=536870912 \
 -DSQLITE_DEFAULT_CACHE_SIZE=-98304 \
 -DSQLITE_DEFAULT_MEMSTATUS=0 \
 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
@@ -88,24 +94,30 @@ ARG NAVIDROME_CACHEBUST
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      git && \
+      git \
+      ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
-RUN echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
-    git init . && \
-    git remote add origin "${NAVIDROME_REPOSITORY}" && \
+RUN set -eux; \
+    echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null; \
+    git init .; \
+    git remote add origin "${NAVIDROME_REPOSITORY}"; \
     if git ls-remote --exit-code --heads origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-      git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}"; \
-    elif git ls-remote --exit-code --tags origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-      git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}"; \
+      echo "[source] fetching branch ${NAVIDROME_REF}"; \
+      git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}:refs/remotes/origin/${NAVIDROME_REF}"; \
+      git checkout --detach "refs/remotes/origin/${NAVIDROME_REF}"; \
+    elif git ls-remote --exit-code --tags --refs origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
+      echo "[source] fetching tag ${NAVIDROME_REF}"; \
+      git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}:refs/tags/${NAVIDROME_REF}"; \
+      git checkout --detach "${NAVIDROME_REF}"; \
     else \
+      echo "[source] fetching raw ref ${NAVIDROME_REF}"; \
       git fetch --depth=1 origin "${NAVIDROME_REF}"; \
-    fi && \
-    git checkout --detach FETCH_HEAD && \
-    git rev-parse --short=12 HEAD > /src/.git_sha && \
+      git checkout --detach FETCH_HEAD; \
+    fi; \
+    git rev-parse --short=12 HEAD > /src/.git_sha; \
     rm -rf .git
 
 # =========================================================
@@ -123,16 +135,10 @@ ARG THIN_LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      bzip2 \
-      build-essential \
-      ca-certificates \
-      clang \
-      lld \
-      llvm \
-      libtool \
-      wget
+      build-essential clang lld llvm \
+      autoconf automake libtool \
+      bzip2 wget ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -153,12 +159,12 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    LDFLAGS="${THIN_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,-z,noexecstack" \
+    LDFLAGS="${THIN_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
       --disable-stats \
-      --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:1,percpu_arena:disabled,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" && \
+      --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:1,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
@@ -177,16 +183,10 @@ ARG FULL_LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      build-essential \
-      ca-certificates \
-      clang \
-      lld \
-      llvm \
-      libtool \
-      pkg-config \
-      wget
+      build-essential clang lld llvm \
+      pkg-config autoconf automake libtool \
+      wget ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -207,7 +207,7 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,-z,noexecstack" \
+    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
@@ -232,17 +232,10 @@ ARG FULL_LTO_FLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      build-essential \
-      ca-certificates \
-      clang \
-      lld \
-      llvm \
-      libtool \
-      nasm \
-      pkg-config \
-      wget
+      build-essential clang lld llvm \
+      pkg-config autoconf automake libtool \
+      wget ca-certificates nasm && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -263,7 +256,7 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,-z,noexecstack" \
+    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
@@ -305,17 +298,10 @@ ARG FFMPEG_CPU
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      build-essential \
-      ca-certificates \
-      clang \
-      file \
-      lld \
-      llvm \
-      nasm \
-      pkg-config \
-      wget \
-      xz-utils \
-      yasm
+      build-essential clang lld llvm \
+      pkg-config yasm nasm \
+      wget ca-certificates xz-utils file && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
@@ -358,7 +344,7 @@ RUN ./configure \
       --pkg-config-flags=--static \
       --target-os=linux \
       --arch=x86_64 \
-      --cpu=${FFMPEG_CPU} \
+      --cpu="${FFMPEG_CPU}" \
       --disable-runtime-cpudetect \
       --enable-hardcoded-tables \
       --disable-autodetect \
@@ -401,10 +387,11 @@ ARG RUST_TARGET_CPU
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      build-essential \
-      ca-certificates \
       musl-tools \
-      pkg-config && \
+      build-essential \
+      pkg-config \
+      ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
     rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
@@ -825,6 +812,7 @@ RUN --mount=type=cache,target=/root/.npm \
     test -s ./bin/update-workbox.sh && \
     sed -i 's/\r$//' ./bin/update-workbox.sh && \
     chmod 755 ./bin/update-workbox.sh && \
+    ls -la ./bin && \
     npm ci --prefer-offline --no-audit --fund=false
 
 COPY --link --from=source /src/ui ./
@@ -851,17 +839,10 @@ ARG SQLITE_EXTRA_CFLAGS
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      clang \
-      cmake \
-      file \
-      lld \
-      llvm \
-      libutfcpp-dev \
-      make \
-      pkg-config \
-      wget \
-      zlib1g-dev
+      clang lld llvm make cmake \
+      zlib1g-dev ca-certificates pkg-config \
+      wget libutfcpp-dev file && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /taglib-build
 
@@ -938,20 +919,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Official v0.62.0 Zen4 Lite v11" \
-      org.opencontainers.image.description="Official Navidrome v0.62.0 source build, AMD EPYC Zen4 optimized, static Opus/MP3 FFmpeg, balanced 1GB runtime tuning, jemalloc, Rust helpers" \
+      org.opencontainers.image.title="JBS Navidrome Official v0.62.0 Zen4 Lite v11.1" \
+      org.opencontainers.image.description="Official Navidrome v0.62.0, AMD EPYC Zen4 optimized, static Opus/MP3 FFmpeg, jemalloc balanced profile, Rust helpers" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Official-v0.62.0-Zen4-Lite-v11/AMD-EPYC-Zen4/GOAMD64-v4/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Balanced/Jemalloc-Balanced/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Official-v0.62.0-Zen4-Lite-v11.1/AMD-EPYC-Zen4/Opus-MP3-static/FFmpeg-FullLTO/SQLite-Balanced/Jemalloc-Balanced/RustFatLTO-musl-static/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      libstdc++6 \
-      libwebp7 \
-      libwebpdemux2 \
-      zlib1g && \
+      ca-certificates zlib1g libstdc++6 libwebp7 libwebpdemux2 && \
     rm -rf \
       /var/lib/apt/lists/* \
       /usr/share/doc /usr/share/man /usr/share/info \
@@ -1167,7 +1144,7 @@ autotune_resources() {
 
     if is_auto "${JBS_CACHE_WARM_LIMIT_MB:-}"; then
         if [ "$mem_mib" -le 0 ] 2>/dev/null; then
-            warm=64
+            warm=32
         elif [ "$mem_mib" -le 1024 ] 2>/dev/null; then
             warm=0
         elif [ "$mem_mib" -le 2048 ] 2>/dev/null; then
@@ -1184,9 +1161,7 @@ autotune_resources() {
         export ND_DEVSCANNERTHREADS="${GOMAXPROCS:-1}"
     fi
 
-    if is_true "${JBS_AUTOTUNE_LOG:-true}"; then
-        echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
-    fi
+    echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
 }
 
 check_database_writable() {
@@ -1385,14 +1360,13 @@ ARG JBS_GOMEMLIMIT_MAX_MIB
 
 ENV TZ=Asia/Seoul \
     TMPDIR=/cache/tmp \
-    MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:1,percpu_arena:disabled,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" \
+    MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:1,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" \
     GOMAXPROCS=${GOMAXPROCS} \
     GOGC=${GOGC} \
     JBS_GOMEMLIMIT=${GOMEMLIMIT} \
     GODEBUG=netdns=go,madvdontneed=1 \
     FFMPEG_THREADS=${FFMPEG_THREADS} \
     JBS_AUTOTUNE=true \
-    JBS_AUTOTUNE_LOG=true \
     JBS_GOMAXPROCS_MAX=${JBS_GOMAXPROCS_MAX} \
     JBS_FFMPEG_THREADS_MAX=${JBS_FFMPEG_THREADS_MAX} \
     JBS_GOMEMLIMIT_PERCENT=${JBS_GOMEMLIMIT_PERCENT} \
