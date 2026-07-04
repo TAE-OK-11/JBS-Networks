@@ -1,26 +1,19 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Official v0.62.0 Zen4 Lite v11.1
-# AMD EPYC Zen4 / 1 vCPU / 1GB RAM Balanced Edition
+# JBS Networks Navidrome Ultra 6.1 Slim v9 Light Final
+# AMD EPYC Zen3 Dedicated Edition
 #
-# Base:
-#   - Official Navidrome source, pinned stable release tag
-#   - Node 26.4.0
-#   - Go 1.26.4
-#   - Rust 1.96.0
-#   - FFmpeg 8.1.2
-#   - rusqlite 0.40.1
-#
-# Direction:
-#   - Official Navidrome release instead of fork/master
-#   - Zen4-specific build target
-#   - 1 vCPU concurrency limit
-#   - 1GB RAM balanced, not extreme memory saving
-#   - Static Opus/MP3 FFmpeg build
-#   - jemalloc runtime preload with safe fallback
-#   - Startup cache warm disabled by default
-#   - Artwork precache disabled by default
+# Final merge:
+#   - Base: v8 operational/security cleanup
+#   - Update: Node 26.4.0
+#   - Update: FFmpeg 8.1.2
+#   - Update: rusqlite 0.40.1
+#   - Light runtime: lower SQLite cache / mmap
+#   - Light runtime: lower Go memory target
+#   - Light runtime: jemalloc small-server profile
+#   - Light runtime: disable startup cache warm by default
+#   - Light runtime: disable artwork precache by default
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim
@@ -28,9 +21,9 @@ ARG NODE_IMAGE=node:26.4.0-trixie-slim
 ARG GOLANG_IMAGE=golang:1.26.4-trixie
 ARG RUST_IMAGE=rust:1.96.0-slim-trixie
 
-ARG NAVIDROME_REPOSITORY=https://github.com/navidrome/navidrome.git
-ARG NAVIDROME_REF=v0.62.0
-ARG NAVIDROME_CACHEBUST=official-v0.62.0-zen4-v11.1
+ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
+ARG NAVIDROME_REF=master
+ARG NAVIDROME_CACHEBUST=b698f09f
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -38,24 +31,22 @@ ARG OPUS_VERSION=1.6.1
 ARG LAME_VERSION=3.100
 ARG TAGLIB_VERSION=2.3
 
-ARG NAVIDROME_BUILD_CORES=2
+ARG NAVIDROME_BUILD_CORES=4
 ARG FFMPEG_THREADS=auto
 ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
-ARG GOGC=125
+ARG GOGC=100
 ARG SCANSCHEDULE=0
+ARG GOAMD64_VERSION=v3
+ARG RUST_TARGET_CPU=znver3
 
-ARG GOAMD64_VERSION=v4
-ARG RUST_TARGET_CPU=znver4
-ARG FFMPEG_CPU=znver4
-
-ARG JBS_GOMAXPROCS_MAX=1
+ARG JBS_GOMAXPROCS_MAX=2
 ARG JBS_FFMPEG_THREADS_MAX=1
-ARG JBS_GOMEMLIMIT_PERCENT=65
-ARG JBS_GOMEMLIMIT_MIN_MIB=256
-ARG JBS_GOMEMLIMIT_MAX_MIB=768
+ARG JBS_GOMEMLIMIT_PERCENT=55
+ARG JBS_GOMEMLIMIT_MIN_MIB=192
+ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver4 -mtune=znver4 -mprefer-vector-width=256 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver4 -mtune=znver4 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
 ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
@@ -68,9 +59,9 @@ ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=4096 \
 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
 -DSQLITE_TEMP_STORE=2 \
--DSQLITE_DEFAULT_MMAP_SIZE=268435456 \
+-DSQLITE_DEFAULT_MMAP_SIZE=134217728 \
 -DSQLITE_MAX_MMAP_SIZE=536870912 \
--DSQLITE_DEFAULT_CACHE_SIZE=-98304 \
+-DSQLITE_DEFAULT_CACHE_SIZE=-65536 \
 -DSQLITE_DEFAULT_MEMSTATUS=0 \
 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
 -DSQLITE_USE_ALLOCA"
@@ -100,24 +91,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /src
 
-RUN set -eux; \
-    echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null; \
-    git init .; \
-    git remote add origin "${NAVIDROME_REPOSITORY}"; \
+RUN echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
+    git init . && \
+    git remote add origin "${NAVIDROME_REPOSITORY}" && \
     if git ls-remote --exit-code --heads origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-      echo "[source] fetching branch ${NAVIDROME_REF}"; \
-      git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}:refs/remotes/origin/${NAVIDROME_REF}"; \
-      git checkout --detach "refs/remotes/origin/${NAVIDROME_REF}"; \
-    elif git ls-remote --exit-code --tags --refs origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
-      echo "[source] fetching tag ${NAVIDROME_REF}"; \
-      git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}:refs/tags/${NAVIDROME_REF}"; \
-      git checkout --detach "${NAVIDROME_REF}"; \
+      git fetch --depth=1 origin "refs/heads/${NAVIDROME_REF}"; \
+    elif git ls-remote --exit-code --tags origin "${NAVIDROME_REF}" >/dev/null 2>&1; then \
+      git fetch --depth=1 origin "refs/tags/${NAVIDROME_REF}"; \
     else \
-      echo "[source] fetching raw ref ${NAVIDROME_REF}"; \
       git fetch --depth=1 origin "${NAVIDROME_REF}"; \
-      git checkout --detach FETCH_HEAD; \
-    fi; \
-    git rev-parse --short=12 HEAD > /src/.git_sha; \
+    fi && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse --short=12 HEAD > /src/.git_sha && \
     rm -rf .git
 
 # =========================================================
@@ -137,8 +122,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld llvm \
       autoconf automake libtool \
-      bzip2 wget ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      bzip2 wget ca-certificates
 
 WORKDIR /build
 
@@ -164,7 +148,7 @@ RUN CC="clang -fuse-ld=lld" \
       --prefix=/usr/local \
       --disable-cxx \
       --disable-stats \
-      --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:1,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" && \
+      --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
 
@@ -185,8 +169,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld llvm \
       pkg-config autoconf automake libtool \
-      wget ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+      wget ca-certificates
 
 WORKDIR /build
 
@@ -234,8 +217,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld llvm \
       pkg-config autoconf automake libtool \
-      wget ca-certificates nasm && \
-    rm -rf /var/lib/apt/lists/*
+      wget ca-certificates nasm
 
 WORKDIR /build
 
@@ -293,15 +275,13 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
 ARG LLD_FLAGS
-ARG FFMPEG_CPU
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       build-essential clang lld llvm \
       pkg-config yasm nasm \
-      wget ca-certificates xz-utils file && \
-    rm -rf /var/lib/apt/lists/*
+      wget ca-certificates xz-utils file
 
 COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
@@ -344,7 +324,7 @@ RUN ./configure \
       --pkg-config-flags=--static \
       --target-os=linux \
       --arch=x86_64 \
-      --cpu="${FFMPEG_CPU}" \
+      --cpu=znver3 \
       --disable-runtime-cpudetect \
       --enable-hardcoded-tables \
       --disable-autodetect \
@@ -391,7 +371,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       build-essential \
       pkg-config \
       ca-certificates && \
-    rm -rf /var/lib/apt/lists/* && \
     rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
@@ -540,7 +519,7 @@ fn run_sqlite_maint(args: &[String]) -> i32 {
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
             PRAGMA temp_store=MEMORY;
-            PRAGMA mmap_size=268435456;
+            PRAGMA mmap_size=134217728;
             PRAGMA analysis_limit=2000;
             PRAGMA optimize=0x10002;
             PRAGMA wal_checkpoint(PASSIVE);
@@ -841,8 +820,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       clang lld llvm make cmake \
       zlib1g-dev ca-certificates pkg-config \
-      wget libutfcpp-dev file && \
-    rm -rf /var/lib/apt/lists/*
+      wget libutfcpp-dev file
 
 WORKDIR /taglib-build
 
@@ -919,11 +897,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Official v0.62.0 Zen4 Lite v11.1" \
-      org.opencontainers.image.description="Official Navidrome v0.62.0, AMD EPYC Zen4 optimized, static Opus/MP3 FFmpeg, jemalloc balanced profile, Rust helpers" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc light profile, Rust helpers" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Official-v0.62.0-Zen4-Lite-v11.1/AMD-EPYC-Zen4/Opus-MP3-static/FFmpeg-FullLTO/SQLite-Balanced/Jemalloc-Balanced/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -1096,9 +1074,9 @@ autotune_resources() {
     fi
 
     if is_auto "${GOMAXPROCS:-}"; then
-        max="${JBS_GOMAXPROCS_MAX:-1}"
+        max="${JBS_GOMAXPROCS_MAX:-2}"
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
-            max=1
+            max=2
         fi
         export GOMAXPROCS="$(cap_uint "$cores" 1 "$max")"
     fi
@@ -1115,20 +1093,20 @@ autotune_resources() {
 
     gmem_limit="${GOMEMLIMIT:-${JBS_GOMEMLIMIT:-}}"
     if is_auto "$gmem_limit"; then
-        percent="${JBS_GOMEMLIMIT_PERCENT:-65}"
-        min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-256}"
-        max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-768}"
+        percent="${JBS_GOMEMLIMIT_PERCENT:-55}"
+        min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-192}"
+        max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-4096}"
 
         if ! valid_uint "$percent" || [ "$percent" -lt 10 ] 2>/dev/null || [ "$percent" -gt 95 ] 2>/dev/null; then
-            percent=65
+            percent=55
         fi
 
         if ! valid_uint "$min_mib" || [ "$min_mib" -lt 64 ] 2>/dev/null; then
-            min_mib=256
+            min_mib=192
         fi
 
         if ! valid_uint "$max_mib" || [ "$max_mib" -lt "$min_mib" ] 2>/dev/null; then
-            max_mib=768
+            max_mib=4096
         fi
 
         if [ "$mem_mib" -gt 0 ] 2>/dev/null; then
@@ -1323,7 +1301,7 @@ if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
 fi
 
 if [ -x /usr/local/bin/jbs-sqlite-maint ]; then
-    run_optional "${JBS_SQLITE_MAINT:-false}" /usr/local/bin/jbs-sqlite-maint startup
+    run_optional "${JBS_SQLITE_MAINT:-true}" /usr/local/bin/jbs-sqlite-maint startup
 else
     echo "[entrypoint] jbs-sqlite-maint missing; skipping sqlite startup maintenance" >&2
 fi
@@ -1360,7 +1338,7 @@ ARG JBS_GOMEMLIMIT_MAX_MIB
 
 ENV TZ=Asia/Seoul \
     TMPDIR=/cache/tmp \
-    MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:1,tcache:true,tcache_max:32768,dirty_decay_ms:10000,muzzy_decay_ms:30000,oversize_threshold:16777216,retain:false" \
+    MALLOC_CONF="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" \
     GOMAXPROCS=${GOMAXPROCS} \
     GOGC=${GOGC} \
     JBS_GOMEMLIMIT=${GOMEMLIMIT} \
@@ -1380,7 +1358,7 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-98304&_mmap_size=268435456&_secure_delete=OFF" \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-65536&_secure_delete=OFF" \
     ND_DEVOPTIMIZEDB=false \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
@@ -1402,7 +1380,7 @@ ENV TZ=Asia/Seoul \
     ND_TRANSCODING_MAXCONCURRENT=1 \
     ND_TRANSCODING_MAXCONCURRENTPERUSER=1 \
     ND_TRANSCODINGCACHESIZE=2048MiB \
-    ND_IMAGECACHESIZE=384MiB \
+    ND_IMAGECACHESIZE=256MiB \
     ND_COVERARTQUALITY=75 \
     ND_UICOVERARTSIZE=300 \
     ND_UISEARCHDEBOUNCEMS=350 \
