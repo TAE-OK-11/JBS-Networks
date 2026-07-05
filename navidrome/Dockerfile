@@ -23,7 +23,7 @@ ARG RUST_IMAGE=rust:1.96.0-slim-trixie@sha256:c37af730be4fd8104cbf9aedbd6ab259e5
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=b698f09f
+ARG NAVIDROME_CACHEBUST=3fbd98c16649
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -49,6 +49,8 @@ ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
+ARG SQLITE_LTO_FLAGS="-flto"
+ARG TAGLIB_LTO_FLAGS="-flto"
 ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
 
 ARG SQLITE_EXTRA_CFLAGS="\
@@ -811,6 +813,8 @@ ARG NAVIDROME_REF
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG THIN_LTO_FLAGS
+ARG TAGLIB_LTO_FLAGS
+ARG SQLITE_LTO_FLAGS
 ARG LLD_FLAGS
 ARG GOAMD64_VERSION
 ARG SQLITE_EXTRA_CFLAGS
@@ -834,17 +838,17 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO taglib.tar.gz \
       -DBUILD_SHARED_LIBS=OFF \
       -DBUILD_TESTING=OFF \
       -DBUILD_EXAMPLES=OFF \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DTAGLIB_BUILD_EXAMPLES=OFF \
       -DTAGLIB_BUILD_TESTS=OFF \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_AR=llvm-ar \
       -DCMAKE_RANLIB=llvm-ranlib \
-      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} -fPIC" \
-      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
+      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS} -fPIC" \
+      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS} -fPIC" \
+      -DCMAKE_EXE_LINKER_FLAGS="${TAGLIB_LTO_FLAGS} ${LLD_FLAGS}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${TAGLIB_LTO_FLAGS} ${LLD_FLAGS}" \
       -DCMAKE_INSTALL_PREFIX=/usr/local . && \
     make -j"${NAVIDROME_BUILD_CORES}" install
 
@@ -863,14 +867,14 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
-    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
-    CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    CGO_LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
+    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${SQLITE_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
+    CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${SQLITE_LTO_FLAGS}" \
+    CGO_LDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
-    EXTLDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" && \
+    EXTLDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS}" && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build \
       -trimpath \
