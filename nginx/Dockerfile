@@ -15,7 +15,7 @@
 #  - LD_PRELOAD 제거, jemalloc 직접 링크
 # =========================================================
 
-ARG DEBIAN_TRIXIE_DIGEST="sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a"
+ARG DEBIAN_TRIXIE_DIGEST="sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2"
 
 ARG NGINX_VERSION=1.31.2
 
@@ -29,6 +29,7 @@ ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a42170
 
 ARG ZLIBRS_VERSION=v0.6.5
 ARG CARGOC_VERSION=v0.10.23
+ARG CARGOC_X86_64_MUSL_SHA256=603d6a9a25710220d631f0f7ace0e9922d5a69425eb4f1fbcbf6339b357f6d5f
 
 ARG ZSTD_VERSION=1.5.7
 ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
@@ -78,6 +79,7 @@ ARG JEMALLOC_SHA256
 ARG JEMALLOC_MALLOC_CONF
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
+ARG CARGOC_X86_64_MUSL_SHA256
 ARG ZSTD_VERSION
 ARG ZSTD_SHA256
 ARG NGX_ZSTD_MODULE_VERSION
@@ -105,7 +107,9 @@ RUN case "${TARGETARCH:-amd64}" in \
       *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/Zen1 only." >&2; exit 1;; \
     esac
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       autoconf \
@@ -234,6 +238,7 @@ RUN set -eux; \
     curl -fsSL \
       "https://github.com/lu-zero/cargo-c/releases/download/${CARGOC_VERSION}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
       -o /tmp/cargo-c.tar.gz; \
+    echo "${CARGOC_X86_64_MUSL_SHA256}  /tmp/cargo-c.tar.gz" | sha256sum -c -; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
     CARGO_CBUILD="$(find /tmp/cargo-c-tmp -type f -name cargo-cbuild | head -n1)"; \

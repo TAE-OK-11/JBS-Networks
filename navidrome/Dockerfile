@@ -16,10 +16,10 @@
 #   - Light runtime: disable artwork precache by default
 # =========================================================
 
-ARG DEBIAN_IMAGE=debian:trixie-slim
-ARG NODE_IMAGE=node:26.4.0-trixie-slim
-ARG GOLANG_IMAGE=golang:1.26.4-trixie
-ARG RUST_IMAGE=rust:1.96.0-slim-trixie
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+ARG NODE_IMAGE=node:26.4.0-trixie-slim@sha256:a1d9d671994fc2d26e297ac56b4b1522a8bc7fa71c43b14cd1b1fe6c5116f7dc
+ARG GOLANG_IMAGE=golang:1.26.4-trixie@sha256:68b7145ec43d1820b9a56704554b53d1520aa2a15cb5233e374188a31b2a1bce
+ARG RUST_IMAGE=rust:1.96.0-slim-trixie@sha256:c37af730be4fd8104cbf9aedbd6ab259e51ca2d5437817a0f8680edf66ac6c28
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
