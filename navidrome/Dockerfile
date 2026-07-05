@@ -35,7 +35,7 @@ ARG NAVIDROME_BUILD_CORES=4
 ARG FFMPEG_THREADS=auto
 ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
-ARG GOGC=100
+ARG GOGC=125
 ARG SCANSCHEDULE=0
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
@@ -1358,7 +1358,7 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-65536&_secure_delete=OFF" \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-65536&_stmt_cache_size=128&_secure_delete=OFF" \
     ND_DEVOPTIMIZEDB=false \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
