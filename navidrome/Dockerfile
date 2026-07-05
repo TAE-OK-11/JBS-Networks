@@ -1140,7 +1140,14 @@ autotune_resources() {
     fi
 
     if is_auto "${ND_DEVSCANNERTHREADS:-}"; then
-        export ND_DEVSCANNERTHREADS="${GOMAXPROCS:-1}"
+        scanner_threads="${GOMAXPROCS:-1}"
+        if ! valid_uint "$scanner_threads" || [ "$scanner_threads" -lt 1 ] 2>/dev/null; then
+            scanner_threads=1
+        fi
+        if [ "$mem_mib" -gt 768 ] 2>/dev/null && [ "$scanner_threads" -lt 2 ] 2>/dev/null; then
+            scanner_threads=2
+        fi
+        export ND_DEVSCANNERTHREADS="$scanner_threads"
     fi
 
     echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
