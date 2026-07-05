@@ -1144,8 +1144,8 @@ autotune_resources() {
         if ! valid_uint "$scanner_threads" || [ "$scanner_threads" -lt 1 ] 2>/dev/null; then
             scanner_threads=1
         fi
-        if [ "$mem_mib" -gt 768 ] 2>/dev/null && [ "$scanner_threads" -lt 2 ] 2>/dev/null; then
-            scanner_threads=2
+        if [ "$mem_mib" -gt 768 ] 2>/dev/null && [ "$scanner_threads" -lt 4 ] 2>/dev/null; then
+            scanner_threads=4
         fi
         export ND_DEVSCANNERTHREADS="$scanner_threads"
     fi
