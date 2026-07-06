@@ -40,8 +40,8 @@ ARG SCANSCHEDULE=0
 ARG GOAMD64_VERSION=v3
 ARG RUST_TARGET_CPU=znver3
 
-ARG JBS_GOMAXPROCS_MAX=2
-ARG JBS_FFMPEG_THREADS_MAX=1
+ARG JBS_GOMAXPROCS_MAX=4
+ARG JBS_FFMPEG_THREADS_MAX=2
 ARG JBS_GOMEMLIMIT_PERCENT=55
 ARG JBS_GOMEMLIMIT_MIN_MIB=192
 ARG JBS_GOMEMLIMIT_MAX_MIB=4096
@@ -1101,17 +1101,17 @@ autotune_resources() {
     fi
 
     if is_auto "${GOMAXPROCS:-}"; then
-        max="${JBS_GOMAXPROCS_MAX:-2}"
+        max="${JBS_GOMAXPROCS_MAX:-4}"
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
-            max=2
+            max=4
         fi
         export GOMAXPROCS="$(cap_uint "$cores" 1 "$max")"
     fi
 
     if is_auto "${FFMPEG_THREADS:-}"; then
-        max="${JBS_FFMPEG_THREADS_MAX:-1}"
+        max="${JBS_FFMPEG_THREADS_MAX:-2}"
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
-            max=1
+            max=2
         fi
         tuned_ffmpeg=$(( cores / 2 ))
         [ "$tuned_ffmpeg" -lt 1 ] && tuned_ffmpeg=1
@@ -1163,14 +1163,20 @@ autotune_resources() {
     fi
 
     if is_auto "${ND_DEVSCANNERTHREADS:-}"; then
-        scanner_threads="${GOMAXPROCS:-1}"
+        scanner_threads="${GOMAXPROCS:-$cores}"
         if ! valid_uint "$scanner_threads" || [ "$scanner_threads" -lt 1 ] 2>/dev/null; then
             scanner_threads=1
         fi
-        if [ "$mem_mib" -gt 768 ] 2>/dev/null && [ "$scanner_threads" -lt 4 ] 2>/dev/null; then
-            scanner_threads=4
+
+        if [ "$mem_mib" -gt 0 ] 2>/dev/null && [ "$mem_mib" -le 1024 ] 2>/dev/null; then
+            scanner_max=1
+        elif [ "$mem_mib" -gt 0 ] 2>/dev/null && [ "$mem_mib" -le 2048 ] 2>/dev/null; then
+            scanner_max=2
+        else
+            scanner_max=4
         fi
-        export ND_DEVSCANNERTHREADS="$scanner_threads"
+
+        export ND_DEVSCANNERTHREADS="$(cap_uint "$scanner_threads" 1 "$scanner_max")"
     fi
 
     echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
