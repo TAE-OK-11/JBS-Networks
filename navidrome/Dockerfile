@@ -786,6 +786,8 @@ FROM ${NODE_IMAGE} AS jsbuilder
 
 WORKDIR /src/ui
 
+ENV NODE_OPTIONS=--max-old-space-size=3072
+
 COPY --link --from=source /src/ui/package.json /src/ui/package-lock.json ./
 COPY --link --from=source /src/ui/bin/ ./bin/
 
@@ -799,7 +801,21 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY --link --from=source /src/ui ./
 
 RUN --mount=type=cache,target=/root/.npm \
-    npm run build
+    npm run build && \
+    test -s ./build/index.html && \
+    br_count="$(find ./build -type f -name '*.br' | wc -l)" && \
+    gz_count="$(find ./build -type f -name '*.gz' | wc -l)" && \
+    test "${br_count}" -gt 0 && \
+    test "${gz_count}" -gt 0 && \
+    js_bundle="$(find ./build/assets -type f -name 'index-*.js' -print -quit)" && \
+    test -n "${js_bundle}" && \
+    test -s "${js_bundle}.br" && \
+    test -s "${js_bundle}.gz" && \
+    css_bundle="$(find ./build/assets -type f -name 'index-*.css' -print -quit)" && \
+    test -n "${css_bundle}" && \
+    test -s "${css_bundle}.br" && \
+    test -s "${css_bundle}.gz" && \
+    printf '[jsbuilder] precompressed UI assets: br=%s gz=%s\n' "${br_count}" "${gz_count}"
 
 # =========================================================
 # Go / Navidrome build
@@ -861,6 +877,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY --from=source /src ./
 COPY --link --from=jsbuilder /src/ui/build ./ui/build/
+
+RUN test -s ./ui/build/index.html && \
+    test -n "$(find ./ui/build -type f -name '*.br' -print -quit)" && \
+    test -n "$(find ./ui/build -type f -name '*.gz' -print -quit)" && \
+    printf '[gobuilder] embedded UI precompressed assets: br=%s gz=%s\n' \
+      "$(find ./ui/build -type f -name '*.br' | wc -l)" \
+      "$(find ./ui/build -type f -name '*.gz' | wc -l)"
 
 ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_ENABLED=1 \
