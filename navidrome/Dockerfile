@@ -266,7 +266,7 @@ RUN CC="clang -fuse-ld=lld" \
     llvm-ranlib /usr/local/lib/libmp3lame.a
 
 # =========================================================
-# FFmpeg: Opus / MP3 specialized
+# FFmpeg: Opus / MP3 / AAC specialized
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
@@ -346,8 +346,8 @@ RUN ./configure \
       --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg \
       --enable-decoder=alac,aac,aac_fixed,mp3,mp3float,flac,opus,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le \
       --enable-parser=aac,mpegaudio,flac,opus \
-      --enable-encoder=libopus,libmp3lame,pcm_s16le \
-      --enable-muxer=ogg,opus,mp3,wav \
+      --enable-encoder=libopus,libmp3lame,aac,pcm_s16le \
+      --enable-muxer=ogg,opus,mp3,adts,wav \
       --enable-filter=anull,aresample,aformat,volume,atrim,afade \
       --enable-bsf=aac_adtstoasc \
       --enable-libopus \
@@ -355,6 +355,8 @@ RUN ./configure \
       --prefix=/usr/local && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
     strip --strip-unneeded /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+aac[[:space:]]' && \
+    /usr/local/bin/ffmpeg -hide_banner -muxers 2>&1 | grep -Eq '^[[:space:]]*E[[:space:]]+adts[[:space:]]' && \
     file /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
 # =========================================================
@@ -690,21 +692,37 @@ fn require(haystack: &str, needle: &str, failures: &mut Vec<String>) {
     }
 }
 
+fn require_named_entry(output: &str, name: &str, failures: &mut Vec<String>) {
+    let found = output.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .is_some_and(|entry| entry == name)
+    });
+    if !found {
+        failures.push(name.to_string());
+    }
+}
+
 fn run_ffmpeg_preflight(args: &[String]) -> i32 {
     let strict = args.iter().any(|a| a == "--strict");
     let path = ffmpeg_path();
 
     let codecs = capture_ffmpeg(&["-hide_banner", "-codecs"]).unwrap_or_default();
+    let encoders = capture_ffmpeg(&["-hide_banner", "-encoders"]).unwrap_or_default();
     let formats = capture_ffmpeg(&["-hide_banner", "-formats"]).unwrap_or_default();
     let filters = capture_ffmpeg(&["-hide_banner", "-filters"]).unwrap_or_default();
 
     let mut failures = Vec::new();
 
-    for needle in ["libopus", "libmp3lame", "alac", "aac", "mp3", "flac", "opus"] {
+    for needle in ["alac", "aac", "mp3", "flac", "opus"] {
         require(&codecs, needle, &mut failures);
     }
 
-    for needle in ["mov", "mp3", "flac", "wav", "ogg", "opus"] {
+    for encoder in ["libopus", "libmp3lame", "aac"] {
+        require_named_entry(&encoders, encoder, &mut failures);
+    }
+
+    for needle in ["mov", "mp3", "adts", "flac", "wav", "ogg", "opus"] {
         require(&formats, needle, &mut failures);
     }
 
@@ -925,10 +943,10 @@ FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
       org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final" \
-      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, jemalloc light profile, Rust helpers" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3 and native AAC, jemalloc light profile, Rust helpers" \
       org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static-AAC/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -1303,6 +1321,8 @@ ffmpeg_fallback_preflight() {
     fi
 
     codecs="$(/usr/local/bin/ffmpeg.real -hide_banner -codecs 2>&1 || true)"
+    encoders="$(/usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 || true)"
+    formats="$(/usr/local/bin/ffmpeg.real -hide_banner -formats 2>&1 || true)"
 
     for n in libopus libmp3lame alac mp3; do
         contains "$codecs" "$n" || {
@@ -1310,6 +1330,18 @@ ffmpeg_fallback_preflight() {
             return 1
         }
     done
+
+    for n in libopus libmp3lame aac; do
+        contains "$encoders" "$n" || {
+            echo "[entrypoint] missing ffmpeg encoder: $n" >&2
+            return 1
+        }
+    done
+
+    contains "$formats" "adts" || {
+        echo "[entrypoint] missing ffmpeg muxer: adts" >&2
+        return 1
+    }
 
     echo "[entrypoint] ffmpeg fallback preflight ok" >&2
     return 0
