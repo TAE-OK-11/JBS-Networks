@@ -436,35 +436,128 @@ RUN make -j"${NAVIDROME_BUILD_CORES}" V=1 && \
       /usr/local/bin/ffprobe
 
 RUN set -eu; \
-    /usr/local/bin/ffmpeg -hide_banner -encoders > /tmp/encoders.txt 2>&1; \
-    /usr/local/bin/ffmpeg -hide_banner -decoders > /tmp/decoders.txt 2>&1; \
-    /usr/local/bin/ffmpeg -hide_banner -demuxers > /tmp/demuxers.txt 2>&1; \
-    /usr/local/bin/ffmpeg -hide_banner -muxers > /tmp/muxers.txt 2>&1; \
-    /usr/local/bin/ffmpeg -hide_banner -filters > /tmp/filters.txt 2>&1; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+libopus([[:space:]]|$)' \
-      /tmp/encoders.txt || { cat /tmp/encoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+libmp3lame([[:space:]]|$)' \
-      /tmp/encoders.txt || { cat /tmp/encoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+aac([[:space:]]|$)' \
-      /tmp/encoders.txt || { cat /tmp/encoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+flac([[:space:]]|$)' \
-      /tmp/encoders.txt || { cat /tmp/encoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+pcm_s16le([[:space:]]|$)' \
-      /tmp/encoders.txt || { cat /tmp/encoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+alac([[:space:]]|$)' \
-      /tmp/decoders.txt || { cat /tmp/decoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+flac([[:space:]]|$)' \
-      /tmp/decoders.txt || { cat /tmp/decoders.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*D[[:space:]]+mov,' \
-      /tmp/demuxers.txt || { cat /tmp/demuxers.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*D[[:space:]]+s16le([[:space:]]|$)' \
-      /tmp/demuxers.txt || { cat /tmp/demuxers.txt >&2; exit 1; }; \
-    grep -Eq '^[[:space:]]*E[[:space:]]+adts([[:space:]]|$)' \
-      /tmp/muxers.txt || { cat /tmp/muxers.txt >&2; exit 1; }; \
-    grep -Eq '[[:space:]]aresample[[:space:]]' \
-      /tmp/filters.txt || { cat /tmp/filters.txt >&2; exit 1; }; \
-    grep -Eq '[[:space:]]aformat[[:space:]]' \
-      /tmp/filters.txt || { cat /tmp/filters.txt >&2; exit 1; }; \
+    /usr/local/bin/ffmpeg -hide_banner -encoders \
+      > /tmp/encoders.txt 2>&1; \
+    /usr/local/bin/ffmpeg -hide_banner -decoders \
+      > /tmp/decoders.txt 2>&1; \
+    /usr/local/bin/ffmpeg -hide_banner -demuxers \
+      > /tmp/demuxers.txt 2>&1; \
+    /usr/local/bin/ffmpeg -hide_banner -muxers \
+      > /tmp/muxers.txt 2>&1; \
+    /usr/local/bin/ffmpeg -hide_banner -filters \
+      > /tmp/filters.txt 2>&1; \
+    \
+    require_ffmpeg_entry() { \
+      file="$1"; \
+      wanted="$2"; \
+      kind="$3"; \
+      \
+      if awk -v wanted="$wanted" ' \
+        { \
+          count = split($2, names, ","); \
+          for (i = 1; i <= count; i++) { \
+            if (names[i] == wanted) { \
+              found = 1; \
+              exit; \
+            } \
+          } \
+        } \
+        END { \
+          exit(found ? 0 : 1); \
+        } \
+      ' "$file"; then \
+        printf "[ffmpeg-check] %-8s %s: ok\n" \
+          "$kind" "$wanted"; \
+      else \
+        printf "[ffmpeg-check] missing %s: %s\n" \
+          "$kind" "$wanted" >&2; \
+        printf '%s\n' \
+          '========== FFmpeg capability output ==========' >&2; \
+        cat "$file" >&2; \
+        exit 1; \
+      fi; \
+    }; \
+    \
+    for name in \
+      libopus \
+      libmp3lame \
+      aac \
+      flac \
+      pcm_s16le \
+    ; do \
+      require_ffmpeg_entry \
+        /tmp/encoders.txt \
+        "$name" \
+        encoder; \
+    done; \
+    \
+    for name in \
+      alac \
+      aac \
+      mp3 \
+      flac \
+      opus \
+      vorbis \
+      ape \
+      wavpack \
+      pcm_s16le \
+      pcm_s24le \
+      pcm_s32le \
+      pcm_f32le \
+    ; do \
+      require_ffmpeg_entry \
+        /tmp/decoders.txt \
+        "$name" \
+        decoder; \
+    done; \
+    \
+    for name in \
+      mov \
+      mp3 \
+      aac \
+      flac \
+      wav \
+      aiff \
+      ogg \
+      ape \
+      matroska \
+      wv \
+      s16le \
+    ; do \
+      require_ffmpeg_entry \
+        /tmp/demuxers.txt \
+        "$name" \
+        demuxer; \
+    done; \
+    \
+    for name in \
+      ogg \
+      opus \
+      mp3 \
+      adts \
+      wav \
+      flac \
+    ; do \
+      require_ffmpeg_entry \
+        /tmp/muxers.txt \
+        "$name" \
+        muxer; \
+    done; \
+    \
+    for name in \
+      anull \
+      aresample \
+      aformat \
+      volume \
+      atrim \
+      afade \
+    ; do \
+      require_ffmpeg_entry \
+        /tmp/filters.txt \
+        "$name" \
+        filter; \
+    done; \
+    \
     rm -f \
       /tmp/encoders.txt \
       /tmp/decoders.txt \
