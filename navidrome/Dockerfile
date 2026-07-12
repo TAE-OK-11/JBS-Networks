@@ -1,35 +1,54 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.1 Slim v9 Light Final
+# JBS Networks Navidrome Ultra 6.1 Slim v10 Light Final
 # AMD EPYC Zen3 Dedicated Edition
 #
-# Final merge:
-#   - Base: v8 operational/security cleanup
-#   - Update: Node 26.4.0
-#   - Update: FFmpeg 8.1.2
-#   - Update: rusqlite 0.40.1
-#   - Light runtime: lower SQLite cache / mmap
-#   - Light runtime: lower Go memory target
-#   - Light runtime: jemalloc small-server profile
-#   - Light runtime: disable startup cache warm by default
-#   - Light runtime: disable artwork precache by default
+# Updated 2026-07-12:
+#   - Go 1.26.5
+#   - Node.js 26.5.0
+#   - Rust 1.97.0
+#   - FFmpeg 8.1.2
+#   - jemalloc 5.3.1
+#   - Opus 1.6.1
+#   - LAME 4.0 (official release tag r6552)
+#   - TagLib 2.3
+#   - rusqlite 0.40.1
+#
+# Main fixes:
+#   - Correct FFmpeg fallback preflight checks
+#   - Make SQLite doctor validate returned rows
+#   - Stop silently ignoring SQLite open failures
+#   - Add cgroup v1/v2 CPU and memory detection
+#   - Cap CPU quota by cpuset/nproc
+#   - Avoid GOMEMLIMIT minimum exceeding tiny containers
+#   - Verify /data, /cache and /music runtime paths
+#   - Remove risky SQLITE_USE_ALLOCA
+#   - Reduce per-connection SQLite memory for light servers
+#   - Validate FFmpeg capabilities at image build time
+#
+# NOTE:
+#   Base images are pinned to the current multi-platform index digests
+#   verified on 2026-07-12. Refresh these digests when versions change.
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
-ARG NODE_IMAGE=node:26.4.0-trixie-slim@sha256:a1d9d671994fc2d26e297ac56b4b1522a8bc7fa71c43b14cd1b1fe6c5116f7dc
-ARG GOLANG_IMAGE=golang:1.26.4-trixie@sha256:68b7145ec43d1820b9a56704554b53d1520aa2a15cb5233e374188a31b2a1bce
-ARG RUST_IMAGE=rust:1.96.0-slim-trixie@sha256:c37af730be4fd8104cbf9aedbd6ab259e51ca2d5437817a0f8680edf66ac6c28
+ARG NODE_IMAGE=node:26.5.0-trixie-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+ARG GOLANG_IMAGE=golang:1.26.5-trixie@sha256:116489021a0d8ca3facf79f84ee69052cff88733547150a644d45c5eaa91dc43
+ARG RUST_IMAGE=rust:1.97.0-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=c1337986ad3b
+ARG NAVIDROME_CACHEBUST=20260712-v10
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
 ARG OPUS_VERSION=1.6.1
-ARG LAME_VERSION=3.100
+ARG LAME_VERSION=4.0
+ARG LAME_SVN_REVISION=6552
 ARG TAGLIB_VERSION=2.3
+ARG RUSQLITE_VERSION=0.40.1
+ARG WALKDIR_VERSION=2.5.0
 
 ARG NAVIDROME_BUILD_CORES=4
 ARG FFMPEG_THREADS=auto
@@ -46,33 +65,30 @@ ARG JBS_GOMEMLIMIT_PERCENT=55
 ARG JBS_GOMEMLIMIT_MIN_MIB=192
 ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt -falign-functions=32"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
-ARG SQLITE_LTO_FLAGS="-flto"
-ARG TAGLIB_LTO_FLAGS="-flto"
-ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now"
+ARG SQLITE_LTO_FLAGS="-flto=thin"
+ARG TAGLIB_LTO_FLAGS="-flto=thin"
+ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--icf=safe -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--build-id=none"
 
 ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_ENABLE_FTS5 \
 -DSQLITE_ENABLE_STAT4 \
--DSQLITE_ENABLE_JSON1 \
 -DSQLITE_OMIT_SHARED_CACHE \
 -DSQLITE_DEFAULT_WAL_AUTOCHECKPOINT=4096 \
 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
 -DSQLITE_TEMP_STORE=2 \
 -DSQLITE_DEFAULT_MMAP_SIZE=134217728 \
 -DSQLITE_MAX_MMAP_SIZE=536870912 \
--DSQLITE_DEFAULT_CACHE_SIZE=-65536 \
+-DSQLITE_DEFAULT_CACHE_SIZE=-32768 \
 -DSQLITE_DEFAULT_MEMSTATUS=0 \
--DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
--DSQLITE_USE_ALLOCA"
+-DSQLITE_LIKE_DOESNT_MATCH_BLOBS"
 
-ARG JEMALLOC_SHA256="3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
-ARG FFMPEG_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
-ARG OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
-ARG TAGLIB_SHA256="7349f6fd942418bc7009ebe743eb7c9d055f02921ec56fa436ec25007c47fd38"
-ARG LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
+ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
+ARG FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
+ARG OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+ARG TAGLIB_SHA256=7349f6fd942418bc7009ebe743eb7c9d055f02921ec56fa436ec25007c47fd38
 
 # =========================================================
 # Source
@@ -86,10 +102,10 @@ ARG NAVIDROME_CACHEBUST
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      git \
-      ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git
 
 WORKDIR /src
 
@@ -105,6 +121,7 @@ RUN echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
     fi && \
     git checkout --detach FETCH_HEAD && \
     git rev-parse --short=12 HEAD > /src/.git_sha && \
+    git show -s --format=%ct HEAD > /src/.git_epoch && \
     rm -rf .git
 
 # =========================================================
@@ -118,13 +135,22 @@ ARG JEMALLOC_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG THIN_LTO_FLAGS
+ARG LLD_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm \
-      autoconf automake libtool \
-      bzip2 wget ca-certificates
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      autoconf \
+      automake \
+      build-essential \
+      bzip2 \
+      ca-certificates \
+      clang \
+      libtool \
+      lld \
+      llvm \
+      wget
 
 WORKDIR /build
 
@@ -145,14 +171,14 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    LDFLAGS="${THIN_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
+    LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
       --disable-stats \
       --with-malloc-conf="background_thread:true,metadata_thp:disabled,narenas:2,dirty_decay_ms:5000,muzzy_decay_ms:10000,oversize_threshold:8388608,retain:false" && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec strip --strip-unneeded {} +
+    find /usr/local/lib -name "libjemalloc.so.*" ! -type l -exec llvm-strip --strip-unneeded {} +
 
 # =========================================================
 # libopus static
@@ -165,13 +191,22 @@ ARG OPUS_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
+ARG LLD_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm \
-      pkg-config autoconf automake libtool \
-      wget ca-certificates
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      autoconf \
+      automake \
+      build-essential \
+      ca-certificates \
+      clang \
+      libtool \
+      lld \
+      llvm \
+      pkg-config \
+      wget
 
 WORKDIR /build
 
@@ -192,7 +227,7 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
+    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
@@ -209,26 +244,40 @@ RUN CC="clang -fuse-ld=lld" \
 FROM ${DEBIAN_IMAGE} AS lame-builder
 
 ARG LAME_VERSION
-ARG LAME_SHA256
+ARG LAME_SVN_REVISION
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
+ARG LLD_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm \
-      pkg-config autoconf automake libtool \
-      wget ca-certificates nasm
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      autoconf \
+      automake \
+      build-essential \
+      ca-certificates \
+      clang \
+      libtool \
+      lld \
+      llvm \
+      nasm \
+      pkg-config \
+      subversion
 
 WORKDIR /build
 
-RUN wget --https-only --tries=3 --max-redirect=3 -qO lame.tar.gz \
-      "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz" && \
-    echo "${LAME_SHA256}  lame.tar.gz" | sha256sum -c - && \
-    tar -tzf lame.tar.gz >/dev/null && \
-    mkdir lame && \
-    tar -xzf lame.tar.gz --strip-components=1 -C lame
+# SourceForge published LAME 4.0 on 2026-07-11. Pin the immutable release
+# tag at SVN revision r6552 instead of following trunk or an unpinned URL.
+RUN svn export \
+      --non-interactive \
+      --revision "${LAME_SVN_REVISION}" \
+      "https://svn.code.sf.net/p/lame/svn/tags/RELEASE__4_0" \
+      /build/lame && \
+    test -s /build/lame/configure && \
+    chmod 755 /build/lame/configure && \
+    grep -Eq 'Generated by GNU Autoconf .* for lame 4\.0\.' /build/lame/configure
 
 WORKDIR /build/lame
 
@@ -240,11 +289,14 @@ RUN CC="clang -fuse-ld=lld" \
     STRIP=llvm-strip \
     CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
     CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} -Wl,-O2 -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro,-z,now" \
+    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
       --enable-static \
+      --disable-dependency-tracking \
+      --disable-rpath \
+      --enable-nasm \
       --disable-frontend \
       --disable-decoder \
       --disable-analyzer-hooks && \
@@ -266,7 +318,7 @@ RUN CC="clang -fuse-ld=lld" \
     llvm-ranlib /usr/local/lib/libmp3lame.a
 
 # =========================================================
-# FFmpeg: Opus / MP3 / AAC specialized
+# FFmpeg: audio-focused Opus / MP3 / AAC / FLAC
 # =========================================================
 
 FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
@@ -280,10 +332,19 @@ ARG LLD_FLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm \
-      pkg-config yasm nasm \
-      wget ca-certificates xz-utils file
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      clang \
+      file \
+      lld \
+      llvm \
+      nasm \
+      pkg-config \
+      wget \
+      xz-utils \
+      yasm
 
 COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
@@ -295,15 +356,13 @@ COPY --from=lame-builder /usr/local/include/lame /usr/local/include/lame
 
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
-    ldconfig && \
-    pkg-config --modversion opus && \
+RUN pkg-config --modversion opus && \
     pkg-config --modversion libmp3lame && \
     pkg-config --libs --static opus && \
     pkg-config --libs --static libmp3lame && \
     test -f /usr/local/include/lame/lame.h && \
-    test -e /usr/local/lib/libopus.a && \
-    test -e /usr/local/lib/libmp3lame.a
+    test -f /usr/local/lib/libopus.a && \
+    test -f /usr/local/lib/libmp3lame.a
 
 WORKDIR /build
 
@@ -317,11 +376,13 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO ffmpeg.tar.xz \
 WORKDIR /build/ffmpeg
 
 RUN ./configure \
+      --prefix=/usr/local \
       --cc=clang \
       --cxx=clang++ \
       --ar=llvm-ar \
       --ranlib=llvm-ranlib \
       --nm=llvm-nm \
+      --strip=llvm-strip \
       --pkg-config=pkg-config \
       --pkg-config-flags=--static \
       --target-os=linux \
@@ -336,6 +397,8 @@ RUN ./configure \
       --disable-ffplay \
       --enable-ffprobe \
       --disable-everything \
+      --enable-static \
+      --disable-shared \
       --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
       --extra-ldflags="-L/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
       --enable-avcodec \
@@ -343,20 +406,52 @@ RUN ./configure \
       --enable-avfilter \
       --enable-swresample \
       --enable-protocol=file,pipe \
-      --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg \
-      --enable-decoder=alac,aac,aac_fixed,mp3,mp3float,flac,opus,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le \
+      --enable-demuxer=mov,mp3,aac,flac,wav,aiff,ogg,ape,matroska,wv,s16le \
+      --enable-decoder=alac,aac,aac_fixed,mp3,mp3float,flac,opus,vorbis,ape,wavpack,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le \
       --enable-parser=aac,mpegaudio,flac,opus \
-      --enable-encoder=libopus,libmp3lame,aac,pcm_s16le \
-      --enable-muxer=ogg,opus,mp3,adts,wav \
+      --enable-encoder=libopus,libmp3lame,aac,flac,pcm_s16le \
+      --enable-muxer=ogg,opus,mp3,adts,wav,flac \
       --enable-filter=anull,aresample,aformat,volume,atrim,afade \
       --enable-bsf=aac_adtstoasc \
       --enable-libopus \
-      --enable-libmp3lame \
-      --prefix=/usr/local && \
+      --enable-libmp3lame && \
     make -j"${NAVIDROME_BUILD_CORES}" install && \
-    strip --strip-unneeded /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    llvm-strip --strip-unneeded /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+libopus[[:space:]]' && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+libmp3lame[[:space:]]' && \
     /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+aac[[:space:]]' && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+flac[[:space:]]' && \
     /usr/local/bin/ffmpeg -hide_banner -muxers 2>&1 | grep -Eq '^[[:space:]]*E[[:space:]]+adts[[:space:]]' && \
+    /usr/local/bin/ffmpeg -hide_banner -demuxers 2>&1 | grep -Eq '^[[:space:]]*D[[:space:]]+mov,' && \
+    /usr/local/bin/ffmpeg -hide_banner -demuxers 2>&1 | grep -Eq '^[[:space:]]*D[[:space:]]+s16le[[:space:]]' && \
+    dd if=/dev/zero of=/tmp/jbs-silence.s16le bs=192000 count=1 status=none && \
+    /usr/local/bin/ffmpeg -hide_banner -loglevel error -y \
+      -f s16le -ar 48000 -ac 2 -i /tmp/jbs-silence.s16le \
+      -c:a libmp3lame -b:a 192k -f mp3 /tmp/jbs-test.mp3 && \
+    /usr/local/bin/ffmpeg -hide_banner -loglevel error -y \
+      -f s16le -ar 48000 -ac 2 -i /tmp/jbs-silence.s16le \
+      -c:a libopus -b:a 128k -f opus /tmp/jbs-test.opus && \
+    /usr/local/bin/ffmpeg -hide_banner -loglevel error -y \
+      -f s16le -ar 48000 -ac 2 -i /tmp/jbs-silence.s16le \
+      -c:a aac -b:a 192k -f adts /tmp/jbs-test.aac && \
+    /usr/local/bin/ffmpeg -hide_banner -loglevel error -y \
+      -f s16le -ar 48000 -ac 2 -i /tmp/jbs-silence.s16le \
+      -c:a flac -compression_level 5 -f flac /tmp/jbs-test.flac && \
+    test -s /tmp/jbs-test.mp3 && \
+    test -s /tmp/jbs-test.opus && \
+    test -s /tmp/jbs-test.aac && \
+    test -s /tmp/jbs-test.flac && \
+    rm -f /tmp/jbs-silence.s16le /tmp/jbs-test.mp3 \
+      /tmp/jbs-test.opus /tmp/jbs-test.aac /tmp/jbs-test.flac && \
+    ffdeps="$(ldd /usr/local/bin/ffmpeg 2>/dev/null || true)" && \
+    case "$ffdeps" in \
+      *"not found"*) echo "$ffdeps" >&2; exit 1 ;; \
+      *libopus.so*|*libmp3lame.so*) \
+        echo "FFmpeg unexpectedly links dynamically to Opus/LAME" >&2; \
+        echo "$ffdeps" >&2; \
+        exit 1 ;; \
+      *) : ;; \
+    esac && \
     file /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
 # =========================================================
@@ -367,35 +462,37 @@ FROM ${RUST_IMAGE} AS rust-builder
 
 ARG NAVIDROME_BUILD_CORES
 ARG RUST_TARGET_CPU
+ARG RUSQLITE_VERSION
+ARG WALKDIR_VERSION
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      musl-tools \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
       build-essential \
-      pkg-config \
-      ca-certificates && \
+      ca-certificates \
+      musl-tools \
+      pkg-config && \
     rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
 
-RUN mkdir -p src
-
-RUN cat > Cargo.toml <<'TOML'
+RUN mkdir -p src && \
+    cat > Cargo.toml <<TOML
 [package]
 name = "jbs-helper"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = { version = "=0.40.1", features = ["bundled"] }
-walkdir = "=2.5.0"
+rusqlite = { version = "=${RUSQLITE_VERSION}", features = ["bundled"] }
+walkdir = "=${WALKDIR_VERSION}"
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-strip = true
+strip = "symbols"
 panic = "abort"
 TOML
 
@@ -431,12 +528,15 @@ fn run_healthcheck() -> i32 {
     let timeout = Duration::from_secs(4);
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
-        Ok(s) => s,
+        Ok(stream) => stream,
         Err(_) => return 1,
     };
 
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
+    {
+        return 1;
+    }
 
     let req = format!(
         "GET /ping HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
@@ -446,11 +546,30 @@ fn run_healthcheck() -> i32 {
         return 1;
     }
 
+    let mut response = Vec::with_capacity(1024);
     let mut buf = [0u8; 512];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
 
-    if resp.starts_with("HTTP/1.") && resp.contains(" 200 ") {
+    while response.len() < 4096 {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                if response.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return 1,
+        }
+    }
+
+    let status_line = response
+        .split(|b| *b == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .unwrap_or("")
+        .trim_end_matches('\r');
+
+    if status_line.starts_with("HTTP/1.") && status_line.contains(" 200 ") {
         0
     } else {
         1
@@ -458,46 +577,56 @@ fn run_healthcheck() -> i32 {
 }
 
 fn db_file_from_nd_dbpath(value: &str) -> Option<String> {
-    let mut v = value.trim();
+    let mut value = value.trim();
 
-    if let Some(stripped) = v.strip_prefix("file:") {
-        v = stripped;
+    if let Some(stripped) = value.strip_prefix("file:") {
+        value = stripped;
     }
 
-    let file = v.split('?').next().unwrap_or("").trim();
+    let file = value.split('?').next().unwrap_or("").trim();
 
-    if file.is_empty() {
+    if file.is_empty() || file == ":memory:" {
         return None;
     }
 
     Some(file.to_string())
 }
 
-fn open_db() -> Option<Connection> {
+fn open_db() -> Result<Option<Connection>, String> {
     let db_path = env::var("ND_DBPATH").unwrap_or_else(|_| {
         "file:/data/navidrome.db?mode=rwc&_journal_mode=WAL&_synchronous=NORMAL".to_string()
     });
 
-    let file = db_file_from_nd_dbpath(&db_path)?;
+    let Some(file) = db_file_from_nd_dbpath(&db_path) else {
+        return Ok(None);
+    };
 
     if !Path::new(&file).exists() {
         eprintln!("[sqlite-maint] database does not exist yet: {file}");
-        return None;
+        return Ok(None);
     }
 
-    let uri = format!("file:{}?mode=rw", file);
+    let uri = format!("file:{file}?mode=rw");
     let conn = Connection::open_with_flags(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
-    ).ok()?;
+    )
+    .map_err(|err| format!("open {file}: {err}"))?;
 
-    let _ = conn.busy_timeout(Duration::from_secs(120));
-    Some(conn)
+    conn.busy_timeout(Duration::from_secs(120))
+        .map_err(|err| format!("busy timeout: {err}"))?;
+
+    Ok(Some(conn))
 }
 
 fn run_sql(label: &str, sql: &str) -> i32 {
-    let Some(conn) = open_db() else {
-        return 0;
+    let conn = match open_db() {
+        Ok(Some(conn)) => conn,
+        Ok(None) => return 0,
+        Err(err) => {
+            eprintln!("[sqlite-maint] {label}: failed: {err}");
+            return 1;
+        }
     };
 
     match conn.execute_batch(sql) {
@@ -510,6 +639,52 @@ fn run_sql(label: &str, sql: &str) -> i32 {
             1
         }
     }
+}
+
+fn check_pragma(conn: &Connection, pragma: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(pragma)
+        .map_err(|err| format!("{pragma}: prepare failed: {err}"))?;
+
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("{pragma}: query failed: {err}"))?;
+
+    let mut problems = Vec::new();
+
+    for row in rows {
+        let value = row.map_err(|err| format!("{pragma}: row failed: {err}"))?;
+        if !value.eq_ignore_ascii_case("ok") {
+            problems.push(value);
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{pragma}: {}", problems.join(" | ")))
+    }
+}
+
+fn run_sqlite_doctor() -> i32 {
+    let conn = match open_db() {
+        Ok(Some(conn)) => conn,
+        Ok(None) => return 0,
+        Err(err) => {
+            eprintln!("[sqlite-maint] doctor: failed: {err}");
+            return 1;
+        }
+    };
+
+    for pragma in ["PRAGMA quick_check;", "PRAGMA integrity_check;"] {
+        if let Err(err) = check_pragma(&conn, pragma) {
+            eprintln!("[sqlite-maint] doctor: failed: {err}");
+            return 1;
+        }
+    }
+
+    eprintln!("[sqlite-maint] doctor: ok");
+    0
 }
 
 fn run_sqlite_maint(args: &[String]) -> i32 {
@@ -547,13 +722,7 @@ fn run_sqlite_maint(args: &[String]) -> i32 {
             PRAGMA shrink_memory;
             ",
         ),
-        "doctor" => run_sql(
-            "doctor",
-            "
-            PRAGMA quick_check;
-            PRAGMA integrity_check;
-            ",
-        ),
+        "doctor" => run_sqlite_doctor(),
         _ => {
             eprintln!("[sqlite-maint] usage: jbs-sqlite-maint [startup|idle|shutdown|doctor]");
             2
@@ -566,8 +735,8 @@ fn parse_limit_mb(args: &[String]) -> u64 {
 
     while i < args.len() {
         if args[i] == "--limit-mb" {
-            if let Some(v) = args.get(i + 1) {
-                return v.parse::<u64>().unwrap_or(32);
+            if let Some(value) = args.get(i + 1) {
+                return value.parse::<u64>().unwrap_or(32);
             }
         }
         i += 1;
@@ -575,18 +744,20 @@ fn parse_limit_mb(args: &[String]) -> u64 {
 
     env::var("JBS_CACHE_WARM_LIMIT_MB")
         .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(32)
 }
 
-fn read_some(path: &Path, remaining: &mut u64, buf: &mut [u8]) {
+fn read_some(path: &Path, remaining: &mut u64, buf: &mut [u8]) -> u64 {
     if *remaining == 0 {
-        return;
+        return 0;
     }
 
-    let Ok(mut f) = File::open(path) else {
-        return;
+    let Ok(mut file) = File::open(path) else {
+        return 0;
     };
+
+    let before = *remaining;
 
     loop {
         if *remaining == 0 {
@@ -595,14 +766,14 @@ fn read_some(path: &Path, remaining: &mut u64, buf: &mut [u8]) {
 
         let want = (*remaining).min(buf.len() as u64) as usize;
 
-        match f.read(&mut buf[..want]) {
+        match file.read(&mut buf[..want]) {
             Ok(0) => break,
             Ok(n) => *remaining = remaining.saturating_sub(n as u64),
             Err(_) => break,
         }
     }
 
-    eprintln!("[cache-warm] warmed {}", path.display());
+    before.saturating_sub(*remaining)
 }
 
 fn warm_fixed_db_files(data: &str, remaining: &mut u64, buf: &mut [u8]) {
@@ -617,7 +788,12 @@ fn warm_fixed_db_files(data: &str, remaining: &mut u64, buf: &mut [u8]) {
             break;
         }
 
-        read_some(Path::new(&file), remaining, buf);
+        let path = Path::new(&file);
+        let read = read_some(path, remaining, buf);
+
+        if read > 0 {
+            eprintln!("[cache-warm] warmed {} bytes from {}", read, path.display());
+        }
     }
 }
 
@@ -647,7 +823,14 @@ fn run_cache_warm(args: &[String]) -> i32 {
         }
 
         if entry.file_type().is_file() {
-            read_some(entry.path(), &mut remaining, &mut buf);
+            let read = read_some(entry.path(), &mut remaining, &mut buf);
+            if read > 0 {
+                eprintln!(
+                    "[cache-warm] warmed {} bytes from {}",
+                    read,
+                    entry.path().display()
+                );
+            }
             seen += 1;
         }
     }
@@ -657,8 +840,8 @@ fn run_cache_warm(args: &[String]) -> i32 {
 }
 
 fn ffmpeg_path() -> String {
-    let configured = env::var("ND_FFMPEGPATH")
-        .unwrap_or_else(|_| "/usr/local/bin/ffmpeg".to_string());
+    let configured =
+        env::var("ND_FFMPEGPATH").unwrap_or_else(|_| "/usr/local/bin/ffmpeg".to_string());
 
     let real_candidate = format!("{configured}.real");
 
@@ -673,62 +856,82 @@ fn capture_ffmpeg(args: &[&str]) -> Result<String, String> {
     let output = Command::new(ffmpeg_path())
         .args(args)
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|err| err.to_string())?;
 
-    let mut s = String::new();
-    s.push_str(&String::from_utf8_lossy(&output.stdout));
-    s.push_str(&String::from_utf8_lossy(&output.stderr));
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
 
     if output.status.success() {
-        Ok(s)
+        Ok(text)
     } else {
-        Err(s)
+        Err(text)
     }
 }
 
-fn require(haystack: &str, needle: &str, failures: &mut Vec<String>) {
-    if !haystack.contains(needle) {
-        failures.push(needle.to_string());
-    }
-}
-
-fn require_named_entry(output: &str, name: &str, failures: &mut Vec<String>) {
-    let found = output.lines().any(|line| {
+fn has_named_entry(output: &str, name: &str) -> bool {
+    output.lines().any(|line| {
         line.split_whitespace()
             .nth(1)
-            .is_some_and(|entry| entry == name)
-    });
-    if !found {
-        failures.push(name.to_string());
+            .is_some_and(|entry| entry.split(',').any(|item| item == name))
+    })
+}
+
+fn require_entries(
+    output: &str,
+    kind: &str,
+    names: &[&str],
+    failures: &mut Vec<String>,
+) {
+    for name in names {
+        if !has_named_entry(output, name) {
+            failures.push(format!("{kind}:{name}"));
+        }
     }
 }
 
 fn run_ffmpeg_preflight(args: &[String]) -> i32 {
-    let strict = args.iter().any(|a| a == "--strict");
+    let strict = args.iter().any(|arg| arg == "--strict");
     let path = ffmpeg_path();
 
-    let codecs = capture_ffmpeg(&["-hide_banner", "-codecs"]).unwrap_or_default();
+    let decoders = capture_ffmpeg(&["-hide_banner", "-decoders"]).unwrap_or_default();
     let encoders = capture_ffmpeg(&["-hide_banner", "-encoders"]).unwrap_or_default();
-    let formats = capture_ffmpeg(&["-hide_banner", "-formats"]).unwrap_or_default();
+    let demuxers = capture_ffmpeg(&["-hide_banner", "-demuxers"]).unwrap_or_default();
+    let muxers = capture_ffmpeg(&["-hide_banner", "-muxers"]).unwrap_or_default();
     let filters = capture_ffmpeg(&["-hide_banner", "-filters"]).unwrap_or_default();
 
     let mut failures = Vec::new();
 
-    for needle in ["alac", "aac", "mp3", "flac", "opus"] {
-        require(&codecs, needle, &mut failures);
-    }
-
-    for encoder in ["libopus", "libmp3lame", "aac"] {
-        require_named_entry(&encoders, encoder, &mut failures);
-    }
-
-    for needle in ["mov", "mp3", "adts", "flac", "wav", "ogg", "opus"] {
-        require(&formats, needle, &mut failures);
-    }
-
-    for needle in ["aresample", "aformat"] {
-        require(&filters, needle, &mut failures);
-    }
+    require_entries(
+        &decoders,
+        "decoder",
+        &["alac", "aac", "mp3", "flac", "opus", "vorbis"],
+        &mut failures,
+    );
+    require_entries(
+        &encoders,
+        "encoder",
+        &["libopus", "libmp3lame", "aac", "flac", "pcm_s16le"],
+        &mut failures,
+    );
+    require_entries(
+        &demuxers,
+        "demuxer",
+        &["mov", "mp3", "aac", "flac", "wav", "aiff", "ogg"],
+        &mut failures,
+    );
+    require_entries(
+        &muxers,
+        "muxer",
+        &["ogg", "opus", "mp3", "adts", "wav", "flac"],
+        &mut failures,
+    );
+    require_entries(
+        &filters,
+        "filter",
+        &["aresample", "aformat", "volume"],
+        &mut failures,
+    );
 
     if failures.is_empty() {
         eprintln!("[ffmpeg-preflight] ok: {path}");
@@ -752,7 +955,10 @@ fn print_usage() -> i32 {
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| "jbs-helper".to_string());
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "jbs-helper".to_string());
     let name = basename(&argv0).to_string();
 
     let code = if is_cmd(&name, "healthcheck") {
@@ -786,15 +992,26 @@ fn main() {
 }
 RUST
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
     CC_x86_64_unknown_linux_musl=musl-gcc \
+    CFLAGS_x86_64_unknown_linux_musl="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe" \
     RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C target-feature=+crt-static -C opt-level=3 -C lto=fat -C codegen-units=1" \
-    cargo build --release --target x86_64-unknown-linux-musl -j"${NAVIDROME_BUILD_CORES}" && \
+    cargo generate-lockfile && \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    CC_x86_64_unknown_linux_musl=musl-gcc \
+    CFLAGS_x86_64_unknown_linux_musl="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe" \
+    RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} -C target-feature=+crt-static -C opt-level=3 -C lto=fat -C codegen-units=1" \
+    cargo build \
+      --release \
+      --locked \
+      --target x86_64-unknown-linux-musl \
+      -j"${NAVIDROME_BUILD_CORES}" && \
     mkdir -p /out && \
-    cp target/x86_64-unknown-linux-musl/release/jbs-helper /out/jbs-helper
+    cp target/x86_64-unknown-linux-musl/release/jbs-helper /out/jbs-helper && \
+    test -x /out/jbs-helper
 
 # =========================================================
 # UI build
@@ -809,16 +1026,15 @@ ENV NODE_OPTIONS=--max-old-space-size=3072
 COPY --link --from=source /src/ui/package.json /src/ui/package-lock.json ./
 COPY --link --from=source /src/ui/bin/ ./bin/
 
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     test -s ./bin/update-workbox.sh && \
     sed -i 's/\r$//' ./bin/update-workbox.sh && \
     chmod 755 ./bin/update-workbox.sh && \
-    ls -la ./bin && \
     npm ci --prefer-offline --no-audit --fund=false
 
 COPY --link --from=source /src/ui ./
 
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm run build && \
     test -s ./build/index.html && \
     br_count="$(find ./build -type f -name '*.br' | wc -l)" && \
@@ -833,7 +1049,9 @@ RUN --mount=type=cache,target=/root/.npm \
     test -n "${css_bundle}" && \
     test -s "${css_bundle}.br" && \
     test -s "${css_bundle}.gz" && \
-    printf '[jsbuilder] precompressed UI assets: br=%s gz=%s\n' "${br_count}" "${gz_count}"
+    printf '[jsbuilder] precompressed UI assets: br=%s gz=%s\n' \
+      "${br_count}" \
+      "${gz_count}"
 
 # =========================================================
 # Go / Navidrome build
@@ -846,7 +1064,6 @@ ARG TAGLIB_SHA256
 ARG NAVIDROME_REF
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG THIN_LTO_FLAGS
 ARG TAGLIB_LTO_FLAGS
 ARG SQLITE_LTO_FLAGS
 ARG LLD_FLAGS
@@ -855,10 +1072,19 @@ ARG SQLITE_EXTRA_CFLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      clang lld llvm make cmake \
-      zlib1g-dev ca-certificates pkg-config \
-      wget libutfcpp-dev file
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      clang \
+      cmake \
+      file \
+      libutfcpp-dev \
+      lld \
+      llvm \
+      ninja-build \
+      pkg-config \
+      wget \
+      zlib1g-dev
 
 WORKDIR /taglib-build
 
@@ -867,33 +1093,42 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO taglib.tar.gz \
     echo "${TAGLIB_SHA256}  taglib.tar.gz" | sha256sum -c - && \
     tar -tzf taglib.tar.gz >/dev/null && \
     tar -xzf taglib.tar.gz && \
-    cd "taglib-${TAGLIB_VERSION}" && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
+    cmake \
+      -S "taglib-${TAGLIB_VERSION}" \
+      -B build \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=OFF \
       -DBUILD_TESTING=OFF \
       -DBUILD_EXAMPLES=OFF \
+      -DBUILD_BINDINGS=ON \
       -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-      -DTAGLIB_BUILD_EXAMPLES=OFF \
-      -DTAGLIB_BUILD_TESTS=OFF \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_AR=llvm-ar \
       -DCMAKE_RANLIB=llvm-ranlib \
-      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS} -fPIC" \
-      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS} -fPIC" \
+      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS}" \
       -DCMAKE_EXE_LINKER_FLAGS="${TAGLIB_LTO_FLAGS} ${LLD_FLAGS}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${TAGLIB_LTO_FLAGS} ${LLD_FLAGS}" \
-      -DCMAKE_INSTALL_PREFIX=/usr/local . && \
-    make -j"${NAVIDROME_BUILD_CORES}" install
+      -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build build --parallel "${NAVIDROME_BUILD_CORES}" && \
+    cmake --install build && \
+    test -f /usr/local/lib/libtag.a && \
+    test -f /usr/local/lib/libtag_c.a
 
 WORKDIR /src
 
-COPY --from=source /src/go.mod /src/go.sum ./
+COPY --link --from=source /src/go.mod /src/go.sum ./
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+ENV GOTOOLCHAIN=local \
+    GOFLAGS=-mod=readonly
 
-COPY --from=source /src ./
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download && \
+    go mod verify
+
+COPY --link --from=source /src ./
 COPY --link --from=jsbuilder /src/ui/build ./ui/build/
 
 RUN test -s ./ui/build/index.html && \
@@ -912,18 +1147,24 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${SQLITE_LTO_FLAGS}" \
     CGO_LDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
+    SOURCE_DATE_EPOCH="$(cat /src/.git_epoch 2>/dev/null || echo 0)" && \
     EXTLDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS}" && \
+    export SOURCE_DATE_EPOCH && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build \
+      -p "${NAVIDROME_BUILD_CORES}" \
       -trimpath \
       -buildvcs=false \
-      -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 sqlite_json embed" \
+      -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 embed" \
       -ldflags="-linkmode=external -extld=clang -extldflags '${EXTLDFLAGS}' -s -w -buildid= -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} -X github.com/navidrome/navidrome/consts.gitTag=${NAVIDROME_REF}-${GIT_SHA}" \
       -o /out/navidrome . && \
-    file /out/navidrome
+    file /out/navidrome && \
+    go version -m /out/navidrome && \
+    deps="$(ldd /out/navidrome 2>/dev/null || true)" && \
+    case "$deps" in *"not found"*) echo "$deps" >&2; exit 1 ;; *) : ;; esac
 
 # =========================================================
 # Timezone data
@@ -933,7 +1174,8 @@ FROM ${DEBIAN_IMAGE} AS tzdata-extract
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends tzdata
+    apt-get update && \
+    apt-get install -y --no-install-recommends tzdata
 
 # =========================================================
 # Runtime
@@ -942,21 +1184,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v9 Light Final" \
-      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3 and native AAC, jemalloc light profile, Rust helpers" \
-      org.opencontainers.image.source="https://github.com/navidrome/navidrome" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v10 Light Final" \
+      org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, native AAC/FLAC, jemalloc light profile and Rust helpers" \
+      org.opencontainers.image.source="https://github.com/TAE-OK-11/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v9/AMD-EPYC-Zen3/Opus-MP3-static-AAC/FullLTO-FFmpeg/SQLite-Light/Jemalloc-Light/RustFatLTO-musl-static/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/SQLite-Light/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates zlib1g libstdc++6 libwebp7 libwebpdemux2 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libstdc++6 \
+      libwebp7 \
+      libwebpdemux2 \
+      zlib1g && \
     rm -rf \
       /var/lib/apt/lists/* \
-      /usr/share/doc /usr/share/man /usr/share/info \
-      /usr/share/lintian /usr/share/linda \
-      /usr/share/common-licenses /usr/share/locale
+      /usr/share/doc \
+      /usr/share/man \
+      /usr/share/info \
+      /usr/share/lintian \
+      /usr/share/linda \
+      /usr/share/common-licenses \
+      /usr/share/locale
 
 RUN mkdir -p /usr/share/zoneinfo/Asia
 
@@ -970,13 +1221,8 @@ COPY --link --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 COPY --link --from=jemalloc-builder /usr/local/lib/libjemalloc.so.2 /usr/local/lib/
 
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
-    ldconfig && \
     for lib in webp webpdemux; do \
-      target=""; \
-      for cand in /usr/lib/*/lib${lib}.so.* /lib/*/lib${lib}.so.*; do \
-        [ -e "$cand" ] || continue; \
-        target="$cand"; \
-      done; \
+      target="$(find /usr/lib /lib -type f -name "lib${lib}.so.*" -print 2>/dev/null | sort -V | tail -n 1)"; \
       [ -n "$target" ] || { echo "missing native lib${lib}" >&2; exit 1; }; \
       ln -sf "$target" "/usr/local/lib/lib${lib}.so"; \
     done && \
@@ -984,20 +1230,35 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && \
 
 RUN cat > /usr/local/bin/ffmpeg <<'SH'
 #!/bin/sh
-THREADS=$(printf '%d' "${FFMPEG_THREADS:-1}" 2>/dev/null)
-if [ -z "$THREADS" ] || [ "$THREADS" -lt 1 ] 2>/dev/null; then
-    THREADS=1
+case "${FFMPEG_THREADS:-1}" in
+    ''|*[!0-9]*) threads=1 ;;
+    *) threads="${FFMPEG_THREADS}" ;;
+esac
+
+if [ "$threads" -lt 1 ] 2>/dev/null; then
+    threads=1
 fi
+
 exec /usr/local/bin/ffmpeg.real \
-    -nostdin -hide_banner -nostats -loglevel warning \
-    -threads "$THREADS" -filter_threads "$THREADS" "$@"
+    -nostdin \
+    -hide_banner \
+    -nostats \
+    -loglevel warning \
+    -threads "$threads" \
+    -filter_threads "$threads" \
+    "$@"
 SH
 
 RUN chmod 755 /usr/local/bin/ffmpeg
 
 RUN printf '%s\n' 'navidrome:x:1000:1000:Navidrome:/nonexistent:/usr/sbin/nologin' >> /etc/passwd && \
     printf '%s\n' 'navidrome:x:1000:' >> /etc/group && \
-    install -d -o 1000 -g 1000 -m 755 /app /data /music /cache /cache/tmp && \
+    install -d -o 1000 -g 1000 -m 755 \
+      /app \
+      /data \
+      /music \
+      /cache \
+      /cache/tmp && \
     touch /.nddockerenv
 
 COPY --link --chown=1000:1000 --chmod=750 --from=gobuilder /out/navidrome /app/navidrome
@@ -1018,55 +1279,145 @@ RUN test -x /app/navidrome && \
     test -L /usr/local/bin/jbs-ffmpeg-preflight && \
     libs="$(ldconfig -p)" && \
     case "$libs" in *libjemalloc.so.2*) : ;; *) echo "missing libjemalloc.so.2" >&2; exit 1 ;; esac && \
+    navdeps="$(ldd /app/navidrome 2>/dev/null || true)" && \
     ffdeps="$(ldd /usr/local/bin/ffmpeg.real 2>/dev/null || true)" && \
+    case "$navdeps $ffdeps" in *"not found"*) echo "$navdeps" >&2; echo "$ffdeps" >&2; exit 1 ;; *) : ;; esac && \
     case "$ffdeps" in \
       *libopus.so*|*libmp3lame.so*) \
-        echo "ffmpeg is dynamically linked against libopus/libmp3lame; expected static link" >&2; \
-        echo "$ffdeps" >&2; exit 1 ;; \
+        echo "FFmpeg dynamically links to libopus/libmp3lame; expected static link" >&2; \
+        echo "$ffdeps" >&2; \
+        exit 1 ;; \
       *) : ;; \
-    esac
+    esac && \
+    /usr/local/bin/jbs-ffmpeg-preflight --strict
 
 RUN cat > /entrypoint <<'SH'
 #!/bin/sh
 set -eu
 
-is_true() { case "${1:-}" in 1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;; *) return 1 ;; esac; }
-contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
-is_auto() { case "${1:-}" in ""|auto|AUTO|Auto) return 0 ;; *) return 1 ;; esac; }
-valid_uint() { case "${1:-}" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+is_true() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+has_ffmpeg_entry() {
+    output="$1"
+    wanted="$2"
+
+    while IFS= read -r line; do
+        set -- $line
+        [ "$#" -ge 2 ] || continue
+        entries="$2"
+        old_ifs="$IFS"
+        IFS=,
+
+        for entry in $entries; do
+            if [ "$entry" = "$wanted" ]; then
+                IFS="$old_ifs"
+                return 0
+            fi
+        done
+
+        IFS="$old_ifs"
+    done <<EOF
+$output
+EOF
+
+    return 1
+}
+
+is_auto() {
+    case "${1:-}" in
+        ""|auto|AUTO|Auto) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_uint() {
+    case "${1:-}" in
+        ""|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+nproc_safe() {
+    value="$(nproc 2>/dev/null || true)"
+    if ! valid_uint "$value" || [ "$value" -lt 1 ] 2>/dev/null; then
+        value=1
+    fi
+    echo "$value"
+}
 
 detect_cpu_cores() {
+    host_cores="$(nproc_safe)"
+    quota_cores=0
+
     if [ -r /sys/fs/cgroup/cpu.max ]; then
         read -r quota period < /sys/fs/cgroup/cpu.max || true
-        if valid_uint "${quota:-}" && valid_uint "${period:-}" && [ "$period" -gt 0 ] 2>/dev/null; then
-            cores=$(( (quota + period - 1) / period ))
-            [ "$cores" -lt 1 ] && cores=1
-            echo "$cores"
-            return 0
+        if valid_uint "${quota:-}" && \
+           valid_uint "${period:-}" && \
+           [ "$period" -gt 0 ] 2>/dev/null; then
+            quota_cores=$(( (quota + period - 1) / period ))
         fi
     fi
 
-    cores="$(nproc 2>/dev/null || true)"
-    if ! valid_uint "$cores" || [ "$cores" -lt 1 ] 2>/dev/null; then
-        cores=1
+    if [ "$quota_cores" -le 0 ] 2>/dev/null; then
+        for base in /sys/fs/cgroup/cpu /sys/fs/cgroup/cpu,cpuacct; do
+            if [ -r "${base}/cpu.cfs_quota_us" ] && \
+               [ -r "${base}/cpu.cfs_period_us" ]; then
+                read -r quota < "${base}/cpu.cfs_quota_us" || true
+                read -r period < "${base}/cpu.cfs_period_us" || true
+
+                if valid_uint "${quota:-}" && \
+                   valid_uint "${period:-}" && \
+                   [ "$quota" -gt 0 ] 2>/dev/null && \
+                   [ "$period" -gt 0 ] 2>/dev/null; then
+                    quota_cores=$(( (quota + period - 1) / period ))
+                    break
+                fi
+            fi
+        done
     fi
-    echo "$cores"
+
+    if [ "$quota_cores" -gt 0 ] 2>/dev/null && \
+       [ "$quota_cores" -lt "$host_cores" ] 2>/dev/null; then
+        echo "$quota_cores"
+    else
+        echo "$host_cores"
+    fi
 }
 
 detect_memory_mib() {
     if [ -r /sys/fs/cgroup/memory.max ]; then
         read -r max < /sys/fs/cgroup/memory.max || true
         case "${max:-}" in
-            ""|max|*[!0-9]*)
-                ;;
+            ""|max|*[!0-9]*) ;;
             *)
-                if [ "$max" -gt 0 ] 2>/dev/null && [ "$max" -lt 9223372036854771712 ] 2>/dev/null; then
+                if [ "$max" -gt 0 ] 2>/dev/null && \
+                   [ "$max" -lt 9223372036854771712 ] 2>/dev/null; then
                     echo $(( max / 1048576 ))
                     return 0
                 fi
                 ;;
         esac
     fi
+
+    for file in \
+        /sys/fs/cgroup/memory/memory.limit_in_bytes \
+        /sys/fs/cgroup/memory.limit_in_bytes
+    do
+        if [ -r "$file" ]; then
+            read -r max < "$file" || true
+            if valid_uint "${max:-}" && \
+               [ "$max" -gt 0 ] 2>/dev/null && \
+               [ "$max" -lt 9223372036854771712 ] 2>/dev/null; then
+                echo $(( max / 1048576 ))
+                return 0
+            fi
+        fi
+    done
 
     while IFS=' ' read -r key value unit; do
         case "$key" in
@@ -1095,7 +1446,9 @@ cap_uint() {
         value="$min"
     fi
 
-    if valid_uint "$max" && [ "$max" -gt 0 ] 2>/dev/null && [ "$value" -gt "$max" ] 2>/dev/null; then
+    if valid_uint "$max" && \
+       [ "$max" -gt 0 ] 2>/dev/null && \
+       [ "$value" -gt "$max" ] 2>/dev/null; then
         value="$max"
     fi
 
@@ -1104,6 +1457,19 @@ cap_uint() {
 
 autotune_resources() {
     if ! is_true "${JBS_AUTOTUNE:-true}"; then
+        if is_auto "${GOMAXPROCS:-}"; then
+            unset GOMAXPROCS
+        fi
+        if is_auto "${GOMEMLIMIT:-}"; then
+            unset GOMEMLIMIT
+        fi
+        if is_auto "${FFMPEG_THREADS:-}"; then
+            export FFMPEG_THREADS=1
+        fi
+        if is_auto "${ND_DEVSCANNERTHREADS:-}"; then
+            export ND_DEVSCANNERTHREADS=1
+        fi
+        echo "[entrypoint] autotune disabled; automatic values sanitized" >&2
         return 0
     fi
 
@@ -1131,18 +1497,22 @@ autotune_resources() {
         if ! valid_uint "$max" || [ "$max" -lt 1 ] 2>/dev/null; then
             max=2
         fi
+
         tuned_ffmpeg=$(( cores / 2 ))
         [ "$tuned_ffmpeg" -lt 1 ] && tuned_ffmpeg=1
         export FFMPEG_THREADS="$(cap_uint "$tuned_ffmpeg" 1 "$max")"
     fi
 
     gmem_limit="${GOMEMLIMIT:-${JBS_GOMEMLIMIT:-}}"
+
     if is_auto "$gmem_limit"; then
         percent="${JBS_GOMEMLIMIT_PERCENT:-55}"
         min_mib="${JBS_GOMEMLIMIT_MIN_MIB:-192}"
         max_mib="${JBS_GOMEMLIMIT_MAX_MIB:-4096}"
 
-        if ! valid_uint "$percent" || [ "$percent" -lt 10 ] 2>/dev/null || [ "$percent" -gt 95 ] 2>/dev/null; then
+        if ! valid_uint "$percent" || \
+           [ "$percent" -lt 10 ] 2>/dev/null || \
+           [ "$percent" -gt 95 ] 2>/dev/null; then
             percent=55
         fi
 
@@ -1150,17 +1520,30 @@ autotune_resources() {
             min_mib=192
         fi
 
-        if ! valid_uint "$max_mib" || [ "$max_mib" -lt "$min_mib" ] 2>/dev/null; then
+        if ! valid_uint "$max_mib" || [ "$max_mib" -lt 64 ] 2>/dev/null; then
             max_mib=4096
         fi
 
         if [ "$mem_mib" -gt 0 ] 2>/dev/null; then
             tuned_mem=$(( mem_mib * percent / 100 ))
+            effective_min="$min_mib"
+
+            if [ "$tuned_mem" -lt "$effective_min" ] 2>/dev/null; then
+                effective_min=32
+                if [ "$tuned_mem" -lt "$effective_min" ] 2>/dev/null; then
+                    effective_min="$tuned_mem"
+                fi
+            fi
         else
             tuned_mem="$max_mib"
+            effective_min="$min_mib"
         fi
 
-        export GOMEMLIMIT="$(cap_uint "$tuned_mem" "$min_mib" "$max_mib")MiB"
+        if [ "$max_mib" -lt "$effective_min" ] 2>/dev/null; then
+            max_mib="$effective_min"
+        fi
+
+        export GOMEMLIMIT="$(cap_uint "$tuned_mem" "$effective_min" "$max_mib")MiB"
     else
         export GOMEMLIMIT="$gmem_limit"
     fi
@@ -1182,48 +1565,81 @@ autotune_resources() {
 
     if is_auto "${ND_DEVSCANNERTHREADS:-}"; then
         scanner_threads="${GOMAXPROCS:-$cores}"
-        if ! valid_uint "$scanner_threads" || [ "$scanner_threads" -lt 1 ] 2>/dev/null; then
+
+        if ! valid_uint "$scanner_threads" || \
+           [ "$scanner_threads" -lt 1 ] 2>/dev/null; then
             scanner_threads=1
         fi
 
-        if [ "$mem_mib" -gt 0 ] 2>/dev/null && [ "$mem_mib" -le 1024 ] 2>/dev/null; then
+        if [ "$mem_mib" -gt 0 ] 2>/dev/null && \
+           [ "$mem_mib" -le 1024 ] 2>/dev/null; then
             scanner_max=1
-        elif [ "$mem_mib" -gt 0 ] 2>/dev/null && [ "$mem_mib" -le 2048 ] 2>/dev/null; then
+        elif [ "$mem_mib" -gt 0 ] 2>/dev/null && \
+             [ "$mem_mib" -le 2048 ] 2>/dev/null; then
             scanner_max=2
         else
             scanner_max=4
         fi
 
-        export ND_DEVSCANNERTHREADS="$(cap_uint "$scanner_threads" 1 "$scanner_max")"
+        export ND_DEVSCANNERTHREADS="$(
+            cap_uint "$scanner_threads" 1 "$scanner_max"
+        )"
     fi
 
     echo "[entrypoint] autotune: cores=${cores} mem=${mem_mib}MiB GOMAXPROCS=${GOMAXPROCS:-unset} GOMEMLIMIT=${GOMEMLIMIT:-unset} FFMPEG_THREADS=${FFMPEG_THREADS:-unset} SCANNER_THREADS=${ND_DEVSCANNERTHREADS:-unset} CACHE_WARM=${JBS_CACHE_WARM_LIMIT_MB:-unset}MB" >&2
 }
 
-check_database_writable() {
-    data_dir="${ND_DATAFOLDER:-/data}"
-    if [ -z "$data_dir" ]; then
-        data_dir=/data
-    fi
+check_writable_dir() {
+    dir="$1"
+    label="$2"
 
-    if [ ! -d "$data_dir" ]; then
-        echo "[entrypoint] fatal: data directory does not exist: $data_dir" >&2
+    if [ ! -d "$dir" ]; then
+        echo "[entrypoint] fatal: ${label} directory does not exist: $dir" >&2
         exit 1
     fi
 
-    if [ ! -w "$data_dir" ]; then
-        echo "[entrypoint] fatal: data directory is not writable by uid=$(id -u): $data_dir" >&2
+    if [ ! -w "$dir" ]; then
+        echo "[entrypoint] fatal: ${label} directory is not writable by uid=$(id -u): $dir" >&2
         exit 1
     fi
 
-    tmp="${data_dir}/.jbs-write-test.$$"
+    tmp="${dir}/.jbs-write-test.$$"
+
     if ! ( : > "$tmp" ) 2>/dev/null; then
-        echo "[entrypoint] fatal: cannot create files in data directory: $data_dir" >&2
+        echo "[entrypoint] fatal: cannot create files in ${label} directory: $dir" >&2
         exit 1
     fi
+
     rm -f "$tmp"
+}
+
+check_runtime_paths() {
+    data_dir="${ND_DATAFOLDER:-/data}"
+    cache_dir="${ND_CACHEFOLDER:-/cache}"
+    music_dir="${ND_MUSICFOLDER:-/music}"
+
+    [ -n "$data_dir" ] || data_dir=/data
+    [ -n "$cache_dir" ] || cache_dir=/cache
+    [ -n "$music_dir" ] || music_dir=/music
+
+    mkdir -p "${cache_dir}/tmp" 2>/dev/null || true
+
+    check_writable_dir "$data_dir" data
+    check_writable_dir "$cache_dir" cache
+    check_writable_dir "${cache_dir}/tmp" cache-tmp
+
+    if [ ! -d "$music_dir" ]; then
+        echo "[entrypoint] fatal: music directory does not exist: $music_dir" >&2
+        exit 1
+    fi
+
+    if [ ! -r "$music_dir" ] || [ ! -x "$music_dir" ]; then
+        echo "[entrypoint] fatal: music directory is not readable/searchable by uid=$(id -u): $music_dir" >&2
+        exit 1
+    fi
 
     db_path="${ND_DBPATH:-${data_dir}/navidrome.db}"
+
     case "$db_path" in
         file:*)
             db_path="${db_path#file:}"
@@ -1234,9 +1650,22 @@ check_database_writable() {
             ;;
     esac
 
-    if [ -n "$db_path" ] && [ -e "$db_path" ] && [ ! -w "$db_path" ]; then
-        echo "[entrypoint] fatal: database file is not writable by uid=$(id -u): $db_path" >&2
-        exit 1
+    if [ -n "$db_path" ]; then
+        if [ -e "$db_path" ] && [ ! -w "$db_path" ]; then
+            echo "[entrypoint] fatal: database file is not writable by uid=$(id -u): $db_path" >&2
+            exit 1
+        fi
+
+        case "$db_path" in
+            /*) db_dir="${db_path%/*}" ;;
+            */*) db_dir="${db_path%/*}" ;;
+            *) db_dir="$(pwd)" ;;
+        esac
+
+        if [ ! -d "$db_dir" ] || [ ! -w "$db_dir" ]; then
+            echo "[entrypoint] fatal: database parent is not writable: $db_dir" >&2
+            exit 1
+        fi
     fi
 }
 
@@ -1282,8 +1711,6 @@ run_required() {
         echo "[entrypoint] required helper failed: $* status=${code}" >&2
         exit "$code"
     fi
-
-    return 0
 }
 
 configure_allocator() {
@@ -1320,37 +1747,55 @@ ffmpeg_fallback_preflight() {
         return 1
     fi
 
-    codecs="$(/usr/local/bin/ffmpeg.real -hide_banner -codecs 2>&1 || true)"
+    decoders="$(/usr/local/bin/ffmpeg.real -hide_banner -decoders 2>&1 || true)"
     encoders="$(/usr/local/bin/ffmpeg.real -hide_banner -encoders 2>&1 || true)"
-    formats="$(/usr/local/bin/ffmpeg.real -hide_banner -formats 2>&1 || true)"
+    demuxers="$(/usr/local/bin/ffmpeg.real -hide_banner -demuxers 2>&1 || true)"
+    muxers="$(/usr/local/bin/ffmpeg.real -hide_banner -muxers 2>&1 || true)"
+    filters="$(/usr/local/bin/ffmpeg.real -hide_banner -filters 2>&1 || true)"
 
-    for n in libopus libmp3lame alac mp3; do
-        contains "$codecs" "$n" || {
-            echo "[entrypoint] missing ffmpeg codec: $n" >&2
+    for name in alac aac mp3 flac opus vorbis; do
+        has_ffmpeg_entry "$decoders" "$name" || {
+            echo "[entrypoint] missing FFmpeg decoder: $name" >&2
             return 1
         }
     done
 
-    for n in libopus libmp3lame aac; do
-        contains "$encoders" "$n" || {
-            echo "[entrypoint] missing ffmpeg encoder: $n" >&2
+    for name in libopus libmp3lame aac flac pcm_s16le; do
+        has_ffmpeg_entry "$encoders" "$name" || {
+            echo "[entrypoint] missing FFmpeg encoder: $name" >&2
             return 1
         }
     done
 
-    contains "$formats" "adts" || {
-        echo "[entrypoint] missing ffmpeg muxer: adts" >&2
-        return 1
-    }
+    for name in mov mp3 aac flac wav aiff ogg; do
+        has_ffmpeg_entry "$demuxers" "$name" || {
+            echo "[entrypoint] missing FFmpeg demuxer: $name" >&2
+            return 1
+        }
+    done
 
-    echo "[entrypoint] ffmpeg fallback preflight ok" >&2
+    for name in ogg opus mp3 adts wav flac; do
+        has_ffmpeg_entry "$muxers" "$name" || {
+            echo "[entrypoint] missing FFmpeg muxer: $name" >&2
+            return 1
+        }
+    done
+
+    for name in aresample aformat volume; do
+        has_ffmpeg_entry "$filters" "$name" || {
+            echo "[entrypoint] missing FFmpeg filter: $name" >&2
+            return 1
+        }
+    done
+
+    echo "[entrypoint] FFmpeg fallback preflight ok" >&2
     return 0
 }
 
 autotune_resources
-check_database_writable
+check_runtime_paths
 
-if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
+if is_true "${JBS_FFMPEG_PREFLIGHT:-false}"; then
     if [ -x /usr/local/bin/jbs-ffmpeg-preflight ]; then
         set +e
         /usr/local/bin/jbs-ffmpeg-preflight --strict
@@ -1360,27 +1805,30 @@ if is_true "${JBS_FFMPEG_PREFLIGHT:-true}"; then
         if [ "$code" -eq 0 ]; then
             :
         elif [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; then
-            echo "[entrypoint] jbs-ffmpeg-preflight unavailable; using ffmpeg.real fallback status=${code}" >&2
-            run_required "true" ffmpeg_fallback_preflight
+            echo "[entrypoint] jbs-ffmpeg-preflight unavailable; using fallback status=${code}" >&2
+            run_required true ffmpeg_fallback_preflight
         else
             echo "[entrypoint] required helper failed: jbs-ffmpeg-preflight --strict status=${code}" >&2
             exit "$code"
         fi
     else
-        echo "[entrypoint] jbs-ffmpeg-preflight missing; using ffmpeg.real fallback" >&2
-        run_required "true" ffmpeg_fallback_preflight
+        echo "[entrypoint] jbs-ffmpeg-preflight missing; using fallback" >&2
+        run_required true ffmpeg_fallback_preflight
     fi
 fi
 
 if [ -x /usr/local/bin/jbs-sqlite-maint ]; then
-    run_optional "${JBS_SQLITE_MAINT:-true}" /usr/local/bin/jbs-sqlite-maint startup
+    run_optional "${JBS_SQLITE_MAINT:-false}" \
+        /usr/local/bin/jbs-sqlite-maint startup
 else
-    echo "[entrypoint] jbs-sqlite-maint missing; skipping sqlite startup maintenance" >&2
+    echo "[entrypoint] jbs-sqlite-maint missing; skipping startup maintenance" >&2
 fi
 
 if is_true "${JBS_CACHE_WARM:-false}"; then
     if [ -x /usr/local/bin/jbs-cache-warm ]; then
-        run_optional "true" /usr/local/bin/jbs-cache-warm --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-32}"
+        run_optional true \
+            /usr/local/bin/jbs-cache-warm \
+            --limit-mb "${JBS_CACHE_WARM_LIMIT_MB:-32}"
     else
         echo "[entrypoint] jbs-cache-warm missing; skipping cache warm" >&2
     fi
@@ -1391,7 +1839,9 @@ configure_allocator
 exec /app/navidrome "$@"
 SH
 
-RUN chmod 755 /entrypoint && /bin/sh -n /entrypoint
+RUN chmod 755 /entrypoint && \
+    /bin/sh -n /entrypoint && \
+    /bin/sh -n /usr/local/bin/ffmpeg
 
 USER 1000:1000
 
@@ -1430,7 +1880,7 @@ ENV TZ=Asia/Seoul \
     ND_DATAFOLDER=/data \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
-    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-65536&_stmt_cache_size=128&_secure_delete=OFF" \
+    ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-32768&_stmt_cache_size=64&_secure_delete=OFF" \
     ND_DEVOPTIMIZEDB=false \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
@@ -1498,7 +1948,7 @@ ENV TZ=Asia/Seoul \
     JBS_SQLITE_MAINT=false \
     JBS_CACHE_WARM=false \
     JBS_CACHE_WARM_LIMIT_MB=auto \
-    JBS_FFMPEG_PREFLIGHT=true \
+    JBS_FFMPEG_PREFLIGHT=false \
     JBS_USE_JEMALLOC=true
 
 EXPOSE 4533
