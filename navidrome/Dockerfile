@@ -26,6 +26,7 @@
 #   - Remove risky SQLITE_USE_ALLOCA
 #   - Reduce per-connection SQLite memory for light servers
 #   - Validate FFmpeg capabilities at image build time
+#   - Enable isolated 3GiB original-audio hot cache on /cache/hot-music
 #
 # NOTE:
 #   Base images are pinned to the current multi-platform index digests
@@ -39,7 +40,7 @@ ARG RUST_IMAGE=rust:1.97.0-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=20260712-v10.3
+ARG NAVIDROME_CACHEBUST=81cebe738bc81dd7b3804062c10dd27db2ec9c33
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -544,7 +545,7 @@ RUN mkdir -p src && \
 [package]
 name = "jbs-helper"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 rusqlite = { version = "=${RUSQLITE_VERSION}", features = ["bundled"] }
@@ -1250,7 +1251,7 @@ LABEL org.opencontainers.image.authors="JBS Networks" \
       org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, native AAC/FLAC, jemalloc light profile and Rust helpers" \
       org.opencontainers.image.source="https://github.com/TAE-OK-11/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.3/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/SQLite-Light/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.3/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/SQLite-Light/HotCache-3GiB/Resource-Aware"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -1320,7 +1321,8 @@ RUN printf '%s\n' 'navidrome:x:1000:1000:Navidrome:/nonexistent:/usr/sbin/nologi
       /data \
       /music \
       /cache \
-      /cache/tmp && \
+      /cache/tmp \
+      /cache/hot-music && \
     touch /.nddockerenv
 
 COPY --link --chown=1000:1000 --chmod=750 --from=gobuilder /out/navidrome /app/navidrome
@@ -1965,6 +1967,12 @@ ENV TZ=Asia/Seoul \
     ND_TRANSCODING_MAXCONCURRENTPERUSER=1 \
     ND_TRANSCODINGCACHESIZE=2048MiB \
     ND_IMAGECACHESIZE=256MiB \
+    ND_HOT_CACHE_ENABLED=true \
+    ND_HOT_CACHE_PATH=/cache/hot-music \
+    ND_HOT_CACHE_MAX_SIZE=3GiB \
+    ND_HOT_CACHE_PROMOTE_ON_PLAY=true \
+    ND_HOT_CACHE_PROMOTION_CONCURRENCY=1 \
+    ND_HOT_CACHE_EVENTS_MAX=2000 \
     ND_COVERARTQUALITY=75 \
     ND_UICOVERARTSIZE=300 \
     ND_UISEARCHDEBOUNCEMS=350 \
