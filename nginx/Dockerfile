@@ -1,18 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================
-# JBS Networks NGINX 5.4 Synergy Lite v3
-# Target: 1 vCPU / 1GB RAM / AMD EPYC Zen1
+# JBS Networks NGINX 5.4 Synergy Lite v4
+# Target: 1 vCPU / 1GB RAM / AMD EPYC Zen1 (Naples)
 #
-# 방향:
-#  - Zen1 최적화: znver3 제거, znver1 + 128-bit vector 선호
-#  - Low RSS: jemalloc arena/tcache/decay 축소
-#  - Low binary surface: 미사용 stream/slice/gunzip/stub_status 제거
-#  - 미사용 CDN 관련 설정 제거
-#  - Cloudflare real-ip include는 유지
-#  - map / realip / proxy_cache / limit_req / limit_conn / gzip / brotli / zstd / HTTP2 / HTTP3 유지
-#  - thread_pool / aio threads / directio 미사용
-#  - LD_PRELOAD 제거, jemalloc 직접 링크
+# Core policy:
+#  - Zen1: znver1 + 128-bit vector preference
+#  - Low RSS: one jemalloc arena, small tcache, short decay
+#  - Low runtime surface: PCRE2/Brotli/Zstd static linkage
+#  - zlib-rs: official libz_rs shared ABI; no fake libz.so/SONAME
+#  - AWS-LC shared linkage for HTTP/2 + HTTP/3
+#  - Go/Rust official pinned toolchains in builder only
+#  - Root master + nginx workers; /etc/nginx is not worker-writable
 # =========================================================
 
 ARG DEBIAN_TRIXIE_DIGEST="sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2"
@@ -27,7 +26,14 @@ ARG AWSLC_VERSION=v5.1.0
 ARG JEMALLOC_VERSION=5.3.1
 ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
 
-ARG ZLIBRS_VERSION=v0.6.5
+ARG GO_VERSION=1.26.5
+ARG GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+
+ARG RUST_VERSION=1.97.0
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_INIT_X86_64_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+
+ARG ZLIBRS_VERSION=v0.6.6
 ARG CARGOC_VERSION=v0.10.23
 ARG CARGOC_X86_64_MUSL_SHA256=603d6a9a25710220d631f0f7ace0e9922d5a69425eb4f1fbcbf6339b357f6d5f
 
@@ -35,10 +41,12 @@ ARG ZSTD_VERSION=1.5.7
 ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 
 ARG NGX_ZSTD_MODULE_VERSION=0.1.1
+ARG BROTLI_VERSION=v1.2.0
 ARG NGX_BROTLI_REF=a71f9312c2deb28875acc7bacfdd5695a111aa53
 
-# Zen1/Naples용: znver3는 제거.
-# Zen1은 256-bit AVX를 내부적으로 128-bit로 처리하는 편이라 128-bit vector 선호.
+# Override with --build-arg BUILD_JOBS=N on a larger builder.
+ARG BUILD_JOBS=2
+
 ARG CPU_FLAGS="-O2 -march=znver1 -mtune=znver1 -mprefer-vector-width=128 -pipe \
  -fstack-protector-strong -fstack-clash-protection \
  -D_FORTIFY_SOURCE=3 \
@@ -46,7 +54,6 @@ ARG CPU_FLAGS="-O2 -march=znver1 -mtune=znver1 -mprefer-vector-width=128 -pipe \
  -fno-semantic-interposition -fno-plt -fomit-frame-pointer \
  -DNDEBUG"
 
-# Full LTO보다 Thin LTO가 빌드 RAM/시간을 덜 먹고, 런타임 차이는 이 용도에서 작음.
 ARG LTO_FLAGS="-flto=thin"
 
 ARG LD_LIB="-fuse-ld=lld \
@@ -61,7 +68,6 @@ ARG LD_NGINX="-fuse-ld=lld \
  -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack \
  -Wl,-z,pack-relative-relocs -Wl,-z,separate-code"
 
-# 1 worker / 1 vCPU 기준 저RSS 설정.
 ARG JEMALLOC_MALLOC_CONF="abort_conf:true,narenas:1,background_thread:false,metadata_thp:disabled,percpu_arena:disabled,tcache:true,tcache_max:8192,dirty_decay_ms:1000,muzzy_decay_ms:5000,oversize_threshold:1048576,retain:false"
 
 # =========================================================
@@ -77,13 +83,20 @@ ARG AWSLC_VERSION
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
 ARG JEMALLOC_MALLOC_CONF
+ARG GO_VERSION
+ARG GO_LINUX_AMD64_SHA256
+ARG RUST_VERSION
+ARG RUSTUP_VERSION
+ARG RUSTUP_INIT_X86_64_SHA256
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
 ARG CARGOC_X86_64_MUSL_SHA256
 ARG ZSTD_VERSION
 ARG ZSTD_SHA256
 ARG NGX_ZSTD_MODULE_VERSION
+ARG BROTLI_VERSION
 ARG NGX_BROTLI_REF
+ARG BUILD_JOBS
 ARG CPU_FLAGS
 ARG LTO_FLAGS
 ARG LD_LIB
@@ -100,56 +113,82 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LLVM_AR=llvm-ar \
     LLVM_RANLIB=llvm-ranlib \
     LLVM_NM=llvm-nm \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN case "${TARGETARCH:-amd64}" in \
-      amd64|"") echo "Building for amd64 / znver1";; \
-      *) echo "Unsupported TARGETARCH=${TARGETARCH}. This image is x86_64/Zen1 only." >&2; exit 1;; \
+      amd64|"") echo "Building for linux/amd64 / AMD Zen1";; \
+      *) echo "Unsupported TARGETARCH=${TARGETARCH}; this image is Zen1 x86_64 only." >&2; exit 1;; \
+    esac; \
+    case "${BUILD_JOBS}" in \
+      ''|*[!0-9]*|0) echo "BUILD_JOBS must be a positive integer." >&2; exit 1;; \
     esac
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
       binutils \
-      build-essential \
       bzip2 \
       ca-certificates \
-      cargo \
       clang \
       cmake \
       curl \
       git \
       gnupg \
-      golang \
+      libc6-dev \
       lld \
       llvm \
       make \
       ninja-build \
-      patchelf \
       perl \
-      pkg-config \
-      rustc \
-      wget \
-      xz-utils; \
+      pkg-config; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 
 # ---------------------------------------------------------
-# 1) PCRE2 static
+# 0) Official Go and Rust toolchains
 # ---------------------------------------------------------
 RUN set -eux; \
-    wget -qO "pcre2-${PCRE2_VERSION}.tar.gz" \
+    curl -fsSLo /tmp/go.tar.gz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
+    echo "${GO_LINUX_AMD64_SHA256}  /tmp/go.tar.gz" | sha256sum -c -; \
+    rm -rf /usr/local/go; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm -f /tmp/go.tar.gz; \
+    go version; \
+    test "$(go env GOARCH)" = amd64
+
+RUN set -eux; \
+    RUST_HOST=x86_64-unknown-linux-gnu; \
+    curl -fsSLo /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUST_HOST}/rustup-init"; \
+    echo "${RUSTUP_INIT_X86_64_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod 0755 /tmp/rustup-init; \
+    /tmp/rustup-init -y \
+      --no-modify-path \
+      --profile minimal \
+      --default-host "${RUST_HOST}" \
+      --default-toolchain "${RUST_VERSION}"; \
+    rm -f /tmp/rustup-init; \
+    rustup --version; \
+    rustc --version; \
+    cargo --version
+
+# ---------------------------------------------------------
+# 1) PCRE2 static + JIT
+# ---------------------------------------------------------
+RUN set -eux; \
+    curl -fsSLo "pcre2-${PCRE2_VERSION}.tar.gz" \
       "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz"; \
     echo "${PCRE2_SHA256}  pcre2-${PCRE2_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "pcre2-${PCRE2_VERSION}.tar.gz"; \
     cd "pcre2-${PCRE2_VERSION}"; \
-    CFLAGS="${CPU_FLAGS}" \
-    LDFLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--as-needed -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack" \
+    CFLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+    LDFLAGS="${LD_LIB} ${LTO_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --enable-jit \
@@ -157,7 +196,7 @@ RUN set -eux; \
       --disable-shared \
       --disable-pcre2-16 \
       --disable-pcre2-32; \
-    make -j"$(nproc)"; \
+    make -j"${BUILD_JOBS}"; \
     make install; \
     test -f /usr/local/lib/libpcre2-8.a; \
     /usr/local/bin/pcre2-config --version; \
@@ -165,10 +204,10 @@ RUN set -eux; \
 
 # ---------------------------------------------------------
 # 2) AWS-LC shared
-# AWS-LC standalone build requires Go; keep golang in builder deps.
 # ---------------------------------------------------------
 RUN set -eux; \
-    git clone --branch "${AWSLC_VERSION}" --depth=1 https://github.com/aws/aws-lc.git /tmp/aws-lc; \
+    git clone --branch "${AWSLC_VERSION}" --depth=1 \
+      https://github.com/aws/aws-lc.git /tmp/aws-lc; \
     cmake -S /tmp/aws-lc -B /tmp/aws-lc/build -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
@@ -181,17 +220,19 @@ RUN set -eux; \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"; \
-    ninja -C /tmp/aws-lc/build install; \
-    find /opt/awslc/lib -maxdepth 2 -name '*.a' -delete; \
-    strip -s /opt/awslc/lib/libssl.so* /opt/awslc/lib/libcrypto.so* || true; \
-    test -f /opt/awslc/lib/libssl.so; \
-    test -f /opt/awslc/lib/libcrypto.so; \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
+      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
+    ninja -C /tmp/aws-lc/build -j"${BUILD_JOBS}" install; \
+    find /opt/awslc/lib -type f -name '*.a' -delete; \
+    find /opt/awslc/lib -type f \
+      \( -name 'libssl.so*' -o -name 'libcrypto.so*' \) \
+      -exec strip --strip-unneeded {} +; \
+    test -e /opt/awslc/lib/libssl.so; \
+    test -e /opt/awslc/lib/libcrypto.so; \
     printf '%s\n' \
       '#include <openssl/ssl.h>' \
       'int main(void) {' \
@@ -199,20 +240,19 @@ RUN set -eux; \
       '    if (ctx == 0) return 1;' \
       '    SSL_CTX_free(ctx);' \
       '    return 0;' \
-      '}' \
-      > /tmp/awslc_preflight.c; \
+      '}' > /tmp/awslc_preflight.c; \
     clang -I/opt/awslc/include -L/opt/awslc/lib -fuse-ld=lld \
       -Wl,-rpath,/opt/awslc/lib \
       -o /tmp/awslc_preflight /tmp/awslc_preflight.c \
       -lssl -lcrypto; \
-    LD_LIBRARY_PATH=/opt/awslc/lib /tmp/awslc_preflight; \
+    /tmp/awslc_preflight; \
     rm -rf /tmp/aws-lc /tmp/awslc_preflight /tmp/awslc_preflight.c
 
 # ---------------------------------------------------------
 # 3) jemalloc shared, directly linked into nginx
 # ---------------------------------------------------------
 RUN set -eux; \
-    wget -qO "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
+    curl -fsSLo "jemalloc-${JEMALLOC_VERSION}.tar.bz2" \
       "https://github.com/jemalloc/jemalloc/releases/download/${JEMALLOC_VERSION}/jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
     echo "${JEMALLOC_SHA256}  jemalloc-${JEMALLOC_VERSION}.tar.bz2" | sha256sum -c -; \
     tar -xjf "jemalloc-${JEMALLOC_VERSION}.tar.bz2"; \
@@ -225,10 +265,13 @@ RUN set -eux; \
       --disable-stats \
       --enable-readlinkat \
       --with-malloc-conf="${JEMALLOC_MALLOC_CONF}"; \
-    make -j"$(nproc)"; \
+    make -j"${BUILD_JOBS}"; \
     make install; \
-    strip -s /usr/local/lib/libjemalloc.so* || true; \
-    test -f /usr/local/lib/libjemalloc.so.2; \
+    find /usr/local/lib -type f \
+      \( -name 'libjemalloc.a' -o -name 'libjemalloc_pic.a' \) -delete; \
+    find /usr/local/lib -type f -name 'libjemalloc.so*' \
+      -exec strip --strip-unneeded {} +; \
+    test -e /usr/local/lib/libjemalloc.so.2; \
     rm -rf "/tmp/jemalloc-${JEMALLOC_VERSION}" "/tmp/jemalloc-${JEMALLOC_VERSION}.tar.bz2"
 
 # ---------------------------------------------------------
@@ -241,8 +284,8 @@ RUN set -eux; \
     echo "${CARGOC_X86_64_MUSL_SHA256}  /tmp/cargo-c.tar.gz" | sha256sum -c -; \
     mkdir -p /tmp/cargo-c-tmp; \
     tar -xzf /tmp/cargo-c.tar.gz -C /tmp/cargo-c-tmp; \
-    CARGO_CBUILD="$(find /tmp/cargo-c-tmp -type f -name cargo-cbuild | head -n1)"; \
-    CARGO_CINSTALL="$(find /tmp/cargo-c-tmp -type f -name cargo-cinstall | head -n1)"; \
+    CARGO_CBUILD="$(find /tmp/cargo-c-tmp -type f -name cargo-cbuild -print -quit)"; \
+    CARGO_CINSTALL="$(find /tmp/cargo-c-tmp -type f -name cargo-cinstall -print -quit)"; \
     test -n "${CARGO_CBUILD}"; \
     test -n "${CARGO_CINSTALL}"; \
     install -Dm755 "${CARGO_CBUILD}" /usr/local/bin/cargo-cbuild; \
@@ -252,42 +295,48 @@ RUN set -eux; \
     cargo cinstall --version
 
 # ---------------------------------------------------------
-# 5) zlib-rs
+# 5) zlib-rs shared
+#
+# Keep the real libz_rs SONAME. NGINX's zlib detection is patched
+# to link -lz_rs directly instead of creating a fake libz.so.
 # ---------------------------------------------------------
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     set -eux; \
     git clone --branch "${ZLIBRS_VERSION}" --depth=1 \
       https://github.com/trifectatechfoundation/zlib-rs.git /tmp/zlib-rs; \
     cd /tmp/zlib-rs/libz-rs-sys-cdylib; \
-    export RUSTFLAGS="-C target-cpu=znver1 -C opt-level=3 -C codegen-units=1 -C lto=thin -C embed-bitcode=yes -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe"; \
-    cargo cinstall --release --prefix=/usr/local --libdir=/usr/local/lib; \
-    if [ ! -f /usr/local/include/zlib.h ]; then \
-      SRC_ZLIB_H="$(find /tmp/zlib-rs -type f -name 'zlib.h' | head -n1)"; \
-      test -n "${SRC_ZLIB_H}"; \
-      cp "${SRC_ZLIB_H}" /usr/local/include/zlib.h; \
-    fi; \
-    if [ ! -f /usr/local/include/zconf.h ]; then \
-      SRC_ZCONF_H="$(find /tmp/zlib-rs -type f -name 'zconf.h' 2>/dev/null | head -n1 || true)"; \
-      if [ -n "${SRC_ZCONF_H}" ]; then cp "${SRC_ZCONF_H}" /usr/local/include/zconf.h; fi; \
-    fi; \
-    test -f /usr/local/include/zlib.h; \
-    cd /usr/local/lib; \
-    REAL_SO=""; \
-    if [ -f libz_rs.so ] && [ ! -L libz_rs.so ]; then \
-      REAL_SO="libz_rs.so"; \
-    elif [ -L libz_rs.so ]; then \
-      REAL_SO="$(basename "$(readlink -f libz_rs.so)")"; \
-    else \
-      REAL_SO="$(find . -maxdepth 1 -type f -name 'libz_rs.so*' -printf '%f\n' | head -n1)"; \
-    fi; \
-    test -n "${REAL_SO}"; \
-    install -Dm755 "/usr/local/lib/${REAL_SO}" /usr/local/lib/libz.so.1.0.0; \
-    patchelf --set-soname libz.so.1 /usr/local/lib/libz.so.1.0.0; \
-    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so.1; \
-    ln -sf libz.so.1.0.0 /usr/local/lib/libz.so; \
-    ln -sf libz.so.1.0.0 /usr/local/lib/libz_rs.so; \
-    strip --strip-debug /usr/local/lib/libz.so.1.0.0 || true; \
+    export CARGO_BUILD_JOBS="${BUILD_JOBS}"; \
+    export RUSTFLAGS="-C target-cpu=znver1 \
+      -C opt-level=3 \
+      -C codegen-units=1 \
+      -C lto=thin \
+      -C embed-bitcode=yes \
+      -C panic=abort \
+      -C llvm-args=-enable-dfa-jump-thread \
+      -C linker=clang \
+      -C link-arg=-fuse-ld=lld \
+      -C link-arg=-Wl,-O2 \
+      -C link-arg=-Wl,--gc-sections \
+      -C link-arg=-Wl,--icf=safe \
+      -C link-arg=-Wl,-z,relro \
+      -C link-arg=-Wl,-z,now \
+      -C link-arg=-Wl,-z,noexecstack"; \
+    cargo cinstall \
+      --release \
+      --locked \
+      --prefix=/usr/local \
+      --libdir=/usr/local/lib; \
+    install -d /usr/local/include; \
+    ZLIB_H="$(find /tmp/zlib-rs -type f -name zlib.h -print -quit)"; \
+    ZCONF_H="$(find /tmp/zlib-rs -type f -name zconf.h -print -quit)"; \
+    test -n "${ZLIB_H}"; \
+    test -n "${ZCONF_H}"; \
+    install -m644 "${ZLIB_H}" /usr/local/include/zlib.h; \
+    install -m644 "${ZCONF_H}" /usr/local/include/zconf.h; \
+    test -e /usr/local/lib/libz_rs.so; \
+    find /usr/local/lib -type f -name 'libz_rs.so*' \
+      -exec strip --strip-unneeded {} +; \
     printf '%s\n' \
       '#include <string.h>' \
       '#include <zlib.h>' \
@@ -295,27 +344,26 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
       '    z_stream z;' \
       '    memset(&z, 0, sizeof(z));' \
       '    if (deflateInit(&z, Z_DEFAULT_COMPRESSION) != Z_OK) return 1;' \
-      '    deflateEnd(&z);' \
-      '    return 0;' \
-      '}' \
-      > /tmp/zlib_preflight.c; \
+      '    return deflateEnd(&z) == Z_OK ? 0 : 1;' \
+      '}' > /tmp/zlib_preflight.c; \
     clang -I/usr/local/include -L/usr/local/lib -fuse-ld=lld \
-      -o /tmp/zlib_preflight /tmp/zlib_preflight.c -lz; \
-    LD_LIBRARY_PATH=/usr/local/lib /tmp/zlib_preflight; \
+      -Wl,-rpath,/usr/local/lib \
+      -o /tmp/zlib_preflight /tmp/zlib_preflight.c -lz_rs; \
+    /tmp/zlib_preflight; \
     rm -rf /tmp/zlib-rs /tmp/zlib_preflight /tmp/zlib_preflight.c
 
 # ---------------------------------------------------------
-# 6) zstd shared
+# 6) Zstd static
 # ---------------------------------------------------------
 RUN set -eux; \
-    wget -qO "zstd-${ZSTD_VERSION}.tar.gz" \
+    curl -fsSLo "zstd-${ZSTD_VERSION}.tar.gz" \
       "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"; \
     echo "${ZSTD_SHA256}  zstd-${ZSTD_VERSION}.tar.gz" | sha256sum -c -; \
     tar -xzf "zstd-${ZSTD_VERSION}.tar.gz"; \
     cmake -S "zstd-${ZSTD_VERSION}/build/cmake" -B /tmp/zstd-build -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DZSTD_BUILD_STATIC=OFF \
-      -DZSTD_BUILD_SHARED=ON \
+      -DZSTD_BUILD_STATIC=ON \
+      -DZSTD_BUILD_SHARED=OFF \
       -DZSTD_BUILD_PROGRAMS=OFF \
       -DZSTD_BUILD_TESTS=OFF \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -325,82 +373,101 @@ RUN set -eux; \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
-      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
-      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
-    ninja -C /tmp/zstd-build install; \
-    strip -s /usr/local/lib/libzstd.so* || true; \
-    rm -rf "/tmp/zstd-${ZSTD_VERSION}" "/tmp/zstd-${ZSTD_VERSION}.tar.gz" /tmp/zstd-build
+      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB} ${LTO_FLAGS}"; \
+    ninja -C /tmp/zstd-build -j"${BUILD_JOBS}" install; \
+    test -f /usr/local/lib/libzstd.a; \
+    rm -rf \
+      "/tmp/zstd-${ZSTD_VERSION}" \
+      "/tmp/zstd-${ZSTD_VERSION}.tar.gz" \
+      /tmp/zstd-build
 
 # ---------------------------------------------------------
-# 7) ngx_brotli + brotli libs
+# 7) ngx_brotli + Brotli static libraries
 # ---------------------------------------------------------
 RUN set -eux; \
-    git clone --filter=blob:none https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
+    git clone --filter=blob:none \
+      https://github.com/google/ngx_brotli.git /tmp/ngx_brotli; \
     cd /tmp/ngx_brotli; \
-    git checkout "${NGX_BROTLI_REF}"; \
-    git submodule update --init --recursive --filter=blob:none
-
-RUN set -eux; \
-    cmake -S /tmp/ngx_brotli/deps/brotli -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
+    git checkout --detach "${NGX_BROTLI_REF}"; \
+    rm -rf /tmp/ngx_brotli/deps/brotli; \
+    git clone --branch "${BROTLI_VERSION}" --depth=1 \
+      https://github.com/google/brotli.git \
+      /tmp/ngx_brotli/deps/brotli; \
+    cmake -S /tmp/ngx_brotli/deps/brotli \
+      -B /tmp/ngx_brotli/deps/brotli/out -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=ON \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
-      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DBROTLI_DISABLE_TESTS=ON \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_C_FLAGS="${CPU_FLAGS}" \
-      -DCMAKE_CXX_FLAGS="${CPU_FLAGS}" \
-      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB}" \
-      -DCMAKE_SHARED_LINKER_FLAGS="${LD_LIB}"; \
-    cmake --build /tmp/ngx_brotli/deps/brotli/out --parallel; \
-    cmake --install /tmp/ngx_brotli/deps/brotli/out; \
-    strip -s /usr/local/lib/libbrotli*.so* || true
+      -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LD_LIB} ${LTO_FLAGS}"; \
+    cmake --build /tmp/ngx_brotli/deps/brotli/out \
+      --parallel "${BUILD_JOBS}" \
+      --target brotlienc; \
+    test -f /tmp/ngx_brotli/deps/brotli/out/libbrotlienc.a; \
+    test -f /tmp/ngx_brotli/deps/brotli/out/libbrotlicommon.a
 
 # ---------------------------------------------------------
 # 8) ngx_http_zstd_module
 # ---------------------------------------------------------
 RUN set -eux; \
     git clone --branch "${NGX_ZSTD_MODULE_VERSION}" --depth=1 \
-      https://github.com/HanadaLee/ngx_http_zstd_module.git /tmp/ngx_http_zstd_module; \
-    sed -i 's/-l:libzstd.a/-lzstd/g' /tmp/ngx_http_zstd_module/config
+      https://github.com/HanadaLee/ngx_http_zstd_module.git \
+      /tmp/ngx_http_zstd_module
 
 # ---------------------------------------------------------
 # 9) NGINX
 # ---------------------------------------------------------
 RUN set -eux; \
-    curl -fSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
-    curl -fSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc"; \
+    curl -fSLo "nginx-${NGINX_VERSION}.tar.gz" \
+      "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
+    curl -fSLo "nginx-${NGINX_VERSION}.tar.gz.asc" \
+      "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc"; \
     mkdir -p /tmp/nginx-keys; \
     for key in nginx_signing mdounin arut pluknet sb thresh; do \
-      curl -fsSL "https://nginx.org/keys/${key}.key" -o "/tmp/nginx-keys/${key}.key" || true; \
+      if ! curl -fsSL "https://nginx.org/keys/${key}.key" \
+        -o "/tmp/nginx-keys/${key}.key"; then \
+        rm -f "/tmp/nginx-keys/${key}.key"; \
+      fi; \
     done; \
+    compgen -G '/tmp/nginx-keys/*.key' >/dev/null; \
     gpg --batch --import /tmp/nginx-keys/*.key; \
-    gpg --batch --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"; \
+    gpg --batch --verify \
+      "nginx-${NGINX_VERSION}.tar.gz.asc" \
+      "nginx-${NGINX_VERSION}.tar.gz"; \
     tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; \
     mv "nginx-${NGINX_VERSION}" /tmp/nginx; \
     cd /tmp/nginx; \
     test -f /usr/local/lib/libpcre2-8.a; \
-    test -f /usr/local/lib/libjemalloc.so.2; \
+    test -e /usr/local/lib/libjemalloc.so.2; \
+    test -e /usr/local/lib/libz_rs.so; \
+    test -f /usr/local/lib/libzstd.a; \
     test -f /usr/local/include/pcre2.h; \
     test -f /usr/local/include/zlib.h; \
-    test -f /opt/awslc/lib/libssl.so; \
-    test -f /opt/awslc/lib/libcrypto.so; \
+    test -e /opt/awslc/lib/libssl.so; \
+    test -e /opt/awslc/lib/libcrypto.so; \
+    grep -q 'ngx_feature_libs="-lz"' auto/lib/zlib/conf; \
+    sed -i \
+      's|ngx_feature_libs="-lz"|ngx_feature_libs="-L/usr/local/lib -Wl,-rpath,/usr/local/lib -lz_rs"|' \
+      auto/lib/zlib/conf; \
     export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/opt/awslc/lib/pkgconfig"; \
+    export ZSTD_INC=/usr/local/include; \
+    export ZSTD_LIB=/usr/local/lib; \
     LD_OPT="${LD_NGINX} ${LTO_FLAGS}"; \
     LD_OPT="${LD_OPT} -Wl,-rpath,/opt/awslc/lib:/usr/local/lib"; \
     LD_OPT="${LD_OPT} -L/opt/awslc/lib -L/usr/local/lib"; \
     LD_OPT="${LD_OPT} -Wl,--no-as-needed -ljemalloc -Wl,--as-needed"; \
-    LD_OPT="${LD_OPT} -lssl -lcrypto -lpcre2-8 -lz -lzstd"; \
-    LD_OPT="${LD_OPT} -lbrotlienc -lbrotlicommon"; \
     ./configure \
       --prefix=/etc/nginx \
       --sbin-path=/usr/sbin/nginx \
@@ -412,9 +479,6 @@ RUN set -eux; \
       --lock-path=/var/run/nginx.lock \
       --http-client-body-temp-path=/var/cache/nginx/client_temp \
       --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
-      --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
-      --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
-      --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
       --user=nginx \
       --group=nginx \
       --with-cc=clang \
@@ -448,11 +512,12 @@ RUN set -eux; \
       --add-module=/tmp/ngx_http_zstd_module \
       --with-cc-opt="${CPU_FLAGS} ${LTO_FLAGS} -I/opt/awslc/include -I/usr/local/include" \
       --with-ld-opt="${LD_OPT}"; \
-    make -j"$(nproc)"; \
+    make -j"${BUILD_JOBS}"; \
     make install; \
-    strip -s /usr/sbin/nginx; \
-    if compgen -G "/usr/lib/nginx/modules/*.so" > /dev/null; then \
-      strip -s /usr/lib/nginx/modules/*.so || true; \
+    strip --strip-unneeded /usr/sbin/nginx; \
+    if compgen -G '/usr/lib/nginx/modules/*.so' >/dev/null; then \
+      find /usr/lib/nginx/modules -type f -name '*.so' \
+        -exec strip --strip-unneeded {} +; \
     fi; \
     nginx -V 2>&1 | tee /tmp/nginx-build-version.txt; \
     grep -q -- '--with-http_v3_module' /tmp/nginx-build-version.txt; \
@@ -470,9 +535,12 @@ RUN set -eux; \
     ! grep -q -- '--with-file-aio' /tmp/nginx-build-version.txt; \
     ! grep -q -- '--with-stream' /tmp/nginx-build-version.txt; \
     ldd /usr/sbin/nginx | tee /tmp/builder_ldd.txt; \
-    ! grep -q "not found" /tmp/builder_ldd.txt; \
-    ! grep -qi "libpcre2" /tmp/builder_ldd.txt; \
-    grep -qi "jemalloc" /tmp/builder_ldd.txt; \
+    ! grep -q 'not found' /tmp/builder_ldd.txt; \
+    grep -qi 'jemalloc' /tmp/builder_ldd.txt; \
+    grep -qi 'libz_rs' /tmp/builder_ldd.txt; \
+    grep -qi 'libssl' /tmp/builder_ldd.txt; \
+    grep -qi 'libcrypto' /tmp/builder_ldd.txt; \
+    ! grep -Eqi 'libpcre2|libzstd|libbrotli' /tmp/builder_ldd.txt; \
     rm -rf \
       /tmp/nginx \
       "/tmp/nginx-${NGINX_VERSION}.tar.gz" \
@@ -490,22 +558,27 @@ RUN set -eux; \
 FROM debian:trixie-slim@${DEBIAN_TRIXIE_DIGEST} AS runtime
 
 ARG NGINX_VERSION
+ARG PCRE2_VERSION
 ARG AWSLC_VERSION
+ARG JEMALLOC_VERSION
+ARG JEMALLOC_MALLOC_CONF
+ARG GO_VERSION
+ARG RUST_VERSION
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
 ARG ZSTD_VERSION
-ARG NGX_BROTLI_REF
-ARG JEMALLOC_VERSION
-ARG PCRE2_VERSION
 ARG NGX_ZSTD_MODULE_VERSION
-ARG JEMALLOC_MALLOC_CONF
+ARG BROTLI_VERSION
+ARG NGX_BROTLI_REF
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends \
       ca-certificates \
+      libgcc-s1 \
       wget; \
     rm -rf /var/lib/apt/lists/*
 
@@ -514,112 +587,143 @@ RUN set -eux; \
       groupadd --system --gid 101 nginx || groupadd --system nginx; \
     fi; \
     if ! id -u nginx >/dev/null 2>&1; then \
-      useradd --system --uid 101 --gid nginx --no-log-init --shell /usr/sbin/nologin nginx \
-      || useradd --system --gid nginx --no-log-init --shell /usr/sbin/nologin nginx; \
+      useradd --system --uid 101 --gid nginx --no-log-init \
+        --shell /usr/sbin/nologin nginx \
+      || useradd --system --gid nginx --no-log-init \
+        --shell /usr/sbin/nologin nginx; \
     fi
 
-COPY --link --from=builder /usr/sbin/nginx              /usr/sbin/nginx
-COPY --link --from=builder /etc/nginx                   /etc/nginx
+COPY --link --from=builder /usr/sbin/nginx /usr/sbin/nginx
+COPY --link --from=builder /etc/nginx /etc/nginx
 
-COPY --link --from=builder /usr/local/lib/libjemalloc.so*   /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libzstd.so*       /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libbrotli*.so*    /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libjemalloc.so* /usr/local/lib/
+COPY --link --from=builder /usr/local/lib/libz_rs.so* /usr/local/lib/
 
-COPY --link --from=builder /usr/local/lib/libz.so.1.0.0     /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libz.so.1         /usr/local/lib/
-COPY --link --from=builder /usr/local/lib/libz.so           /usr/local/lib/
+COPY --link --from=builder /opt/awslc/lib/libssl.so* /opt/awslc/lib/
+COPY --link --from=builder /opt/awslc/lib/libcrypto.so* /opt/awslc/lib/
 
-COPY --link --from=builder /opt/awslc/lib/libssl.so*        /opt/awslc/lib/
-COPY --link --from=builder /opt/awslc/lib/libcrypto.so*     /opt/awslc/lib/
-
-ENV MALLOC_CONF="${JEMALLOC_MALLOC_CONF}" \
-    NGINX_ENTRYPOINT_QUIET_LOGS=1
+ENV MALLOC_CONF="${JEMALLOC_MALLOC_CONF}"
 
 RUN set -eux; \
-    mkdir -p \
+    install -d -o nginx -g nginx -m 0755 \
       /var/log/nginx \
+      /var/cache/nginx \
       /var/cache/nginx/client_temp \
       /var/cache/nginx/proxy_temp \
-      /var/cache/nginx/fastcgi_temp \
-      /var/cache/nginx/uwsgi_temp \
-      /var/cache/nginx/scgi_temp \
-      /var/cache/nginx/navidrome \
-      /etc/nginx/quic \
-      /run; \
-    chown -R nginx:nginx /etc/nginx /var/log/nginx /var/cache/nginx; \
+      /var/cache/nginx/navidrome; \
+    install -d -o root -g root -m 0700 /etc/nginx/quic; \
+    install -d -o root -g root -m 0755 /run; \
+    touch /etc/nginx/cloudflare-ips.conf; \
+    chown -R root:root /etc/nginx; \
+    chmod 0644 /etc/nginx/cloudflare-ips.conf; \
     rm -rf /etc/nginx/logs; \
-    ln -sf /var/log/nginx /etc/nginx/logs; \
+    ln -s /var/log/nginx /etc/nginx/logs; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
-    printf "/usr/local/lib\n/opt/awslc/lib\n" > /etc/ld.so.conf.d/jbs-custom-libs.conf; \
+    printf '%s\n' '/usr/local/lib' '/opt/awslc/lib' \
+      > /etc/ld.so.conf.d/jbs-custom-libs.conf; \
     ldconfig; \
     umask 077; \
     head -c 32 /dev/urandom > /etc/nginx/quic/host.key; \
     chmod 600 /etc/nginx/quic/host.key; \
     ldd /usr/sbin/nginx | tee /tmp/runtime_ldd.txt; \
-    ! grep -q "not found" /tmp/runtime_ldd.txt; \
-    ! grep -qi "libpcre2" /tmp/runtime_ldd.txt; \
-    grep -qi "jemalloc" /tmp/runtime_ldd.txt; \
+    ! grep -q 'not found' /tmp/runtime_ldd.txt; \
+    grep -qi 'jemalloc' /tmp/runtime_ldd.txt; \
+    grep -qi 'libz_rs' /tmp/runtime_ldd.txt; \
+    grep -qi 'libssl' /tmp/runtime_ldd.txt; \
+    grep -qi 'libcrypto' /tmp/runtime_ldd.txt; \
+    ! grep -Eqi 'libpcre2|libzstd|libbrotli' /tmp/runtime_ldd.txt; \
     nginx -V; \
     nginx -t; \
     nginx; \
-    sleep 0.5; \
+    for _ in 1 2 3 4 5 6 7 8 9 10; do \
+      test -s /var/run/nginx.pid && break; \
+      sleep 0.1; \
+    done; \
     NGINX_PID="$(cat /var/run/nginx.pid)"; \
     grep -qi jemalloc "/proc/${NGINX_PID}/maps" \
-      && echo "[OK] jemalloc confirmed in running nginx master maps" \
-      || { echo "[ERROR] jemalloc not found in running nginx master maps" >&2; nginx -s quit || true; exit 1; }; \
+      && echo '[OK] jemalloc confirmed in running nginx master maps' \
+      || { echo '[ERROR] jemalloc not loaded by nginx' >&2; nginx -s quit || true; exit 1; }; \
     nginx -s quit; \
-    sleep 0.5; \
-    rm -f /etc/nginx/quic/host.key /tmp/runtime_ldd.txt
+    for _ in 1 2 3 4 5 6 7 8 9 10; do \
+      kill -0 "${NGINX_PID}" 2>/dev/null || break; \
+      sleep 0.1; \
+    done; \
+    ! kill -0 "${NGINX_PID}" 2>/dev/null; \
+    rm -f \
+      /etc/nginx/quic/host.key \
+      /tmp/runtime_ldd.txt \
+      /var/run/nginx.pid
 
 RUN cat > /usr/local/bin/jbs-nginx-entrypoint <<'EOF'
 #!/bin/sh
-set -e
+set -eu
 
 if [ "${1#-}" != "$1" ]; then
   set -- nginx "$@"
 fi
 
 if [ "$1" = "nginx" ]; then
-  mkdir -p /etc/nginx/quic 2>/dev/null || true
+  mkdir -p \
+    /run \
+    /var/log/nginx \
+    /var/cache/nginx/client_temp \
+    /var/cache/nginx/proxy_temp \
+    /var/cache/nginx/navidrome \
+    /etc/nginx/quic 2>/dev/null || true
+
+  chown nginx:nginx \
+    /var/log/nginx \
+    /var/cache/nginx/client_temp \
+    /var/cache/nginx/proxy_temp \
+    /var/cache/nginx/navidrome 2>/dev/null || true
+
+  if [ ! -e /etc/nginx/cloudflare-ips.conf ]; then
+    : > /etc/nginx/cloudflare-ips.conf 2>/dev/null || true
+    chmod 0644 /etc/nginx/cloudflare-ips.conf 2>/dev/null || true
+  fi
+
   if [ -d /etc/nginx/quic ] && [ ! -s /etc/nginx/quic/host.key ]; then
     umask 077
     head -c 32 /dev/urandom > /etc/nginx/quic/host.key 2>/dev/null || true
     chmod 600 /etc/nginx/quic/host.key 2>/dev/null || true
   fi
-
-  # Cloudflare real-ip 파일만 호환용으로 생성.
-  touch /etc/nginx/cloudflare-ips.conf 2>/dev/null || true
 fi
 
 exec "$@"
 EOF
 
-RUN chmod +x /usr/local/bin/jbs-nginx-entrypoint
+RUN chmod 0755 /usr/local/bin/jbs-nginx-entrypoint
 
 EXPOSE 80 443/tcp 443/udp
 
 HEALTHCHECK --interval=60s --timeout=3s --start-period=15s --retries=3 \
-  CMD wget -qO- --max-redirect=0 --timeout=2 http://127.0.0.1/nginx-health > /dev/null 2>&1 \
-      || wget -qO- --max-redirect=0 --timeout=2 http://127.0.0.1/ > /dev/null 2>&1 \
+  CMD wget -qO- --max-redirect=0 --timeout=2 \
+        http://127.0.0.1/nginx-health >/dev/null 2>&1 \
+      || wget -qO- --max-redirect=0 --timeout=2 \
+        http://127.0.0.1/ >/dev/null 2>&1 \
       || exit 1
 
 STOPSIGNAL SIGQUIT
 
-LABEL project="JBS Networks NGINX 5.4 Synergy Lite v3" \
+LABEL project="JBS Networks NGINX 5.4 Synergy Lite v4" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
+      go.builder.version="${GO_VERSION}" \
+      rust.builder.version="${RUST_VERSION}" \
       zlib-rs.version="${ZLIBRS_VERSION}" \
       cargo-c.version="${CARGOC_VERSION}" \
       zstd.version="${ZSTD_VERSION}" \
       jemalloc.version="${JEMALLOC_VERSION}" \
+      brotli.version="${BROTLI_VERSION}" \
       ngx_brotli.ref="${NGX_BROTLI_REF}" \
       ngx_zstd.version="${NGX_ZSTD_MODULE_VERSION}" \
-      runtime.mode="rootful-container-root-master-nginx-workers" \
-      memory.policy="zen1-1vcpu-1gb-jemalloc-direct-link-low-rss" \
-      compatibility="keeps-map-realip-proxy-cache-limit-http2-http3-brotli-zstd-gzip-cloudflare-realip" \
-      optimization="Zen1/Clang/LLD/ThinLTO/AWS-LC-5.1.0/Jemalloc-DirectLink/PCRE2-Static/zlib-rs-0.6.5/Brotli/Zstd/HTTP3/LowOverhead/EpollOnly/NoStream/NoThreads/NoAIO"
+      runtime.mode="root-master-nginx-workers" \
+      memory.policy="zen1-1vcpu-1gb-jemalloc-one-arena-low-rss" \
+      linkage="pcre2-brotli-zstd-static;jemalloc-zlib-rs-awslc-shared" \
+      compatibility="map-realip-proxy-cache-limit-http2-http3-brotli-zstd-gzip-cloudflare-realip" \
+      optimization="Zen1/Clang/LLD/ThinLTO/AWS-LC-5.1.0/PCRE2-Static/zlib-rs-0.6.6/Brotli-1.2.0-Static/Zstd-Static/HTTP3/EpollOnly/NoStream/NoThreads/NoAIO"
 
 ENTRYPOINT ["/usr/local/bin/jbs-nginx-entrypoint"]
 CMD ["nginx", "-g", "daemon off;"]
