@@ -27,6 +27,7 @@
 #   - Reduce per-connection SQLite memory for light servers
 #   - Validate FFmpeg capabilities at image build time
 #   - Enable isolated 3GiB original-audio hot cache on /cache/hot-music
+#   - Use two scanner I/O workers from 512MiB while keeping GOMAXPROCS cgroup-bound
 #
 # NOTE:
 #   Base images are pinned to the current multi-platform index digests
@@ -1636,13 +1637,17 @@ autotune_resources() {
         fi
 
         if [ "$mem_mib" -gt 0 ] 2>/dev/null && \
-           [ "$mem_mib" -le 1024 ] 2>/dev/null; then
+           [ "$mem_mib" -le 512 ] 2>/dev/null; then
             scanner_max=1
         elif [ "$mem_mib" -gt 0 ] 2>/dev/null && \
              [ "$mem_mib" -le 2048 ] 2>/dev/null; then
             scanner_max=2
         else
             scanner_max=4
+        fi
+
+        if [ "$scanner_max" -gt 1 ] 2>/dev/null; then
+            scanner_threads=$(( scanner_threads + 1 ))
         fi
 
         export ND_DEVSCANNERTHREADS="$(
