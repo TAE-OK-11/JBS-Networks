@@ -138,7 +138,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       llvm \
       make \
       ninja-build \
-      perl \
       pkg-config; \
     rm -rf /var/lib/apt/lists/*
 
@@ -197,6 +196,8 @@ RUN set -eux; \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
       -DBUILD_TESTING=OFF \
+      -DDISABLE_GO=ON \
+      -DDISABLE_PERL=ON \
       -DCMAKE_INSTALL_PREFIX=/opt/awslc \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_C_COMPILER=clang \
