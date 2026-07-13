@@ -44,11 +44,6 @@ env:
   IMAGE_NAME:   ${{ secrets.DOCKER_USERNAME }}/jbs-navidrome
   DOCKER_BUILD_RECORD_UPLOAD: false
   DOCKER_BUILD_SUMMARY: true
-  GOAMD64:      v3
-  GOFLAGS:      "-trimpath"
-  CGO_CFLAGS:   "-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer"
-  CGO_CXXFLAGS: "-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer"
-  RUSTFLAGS:    "-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1"
 
 jobs:
   build:
@@ -59,7 +54,7 @@ jobs:
     steps:
       # ── 1. 체크아웃 ────────────────────────────────────────────────────────
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -108,22 +103,20 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..5}; do
-            if docker pull moby/buildkit:v0.23.0; then
+            if docker pull moby/buildkit:v0.31.1; then
               exit 0
             fi
             sleep $((attempt * 15))
           done
-          docker pull moby/buildkit:v0.23.0
+          docker pull moby/buildkit:v0.31.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
           driver-opts: |
-            image=moby/buildkit:v0.23.0
+            image=moby/buildkit:v0.31.1
             network=host
-          buildkitd-flags: >-
-            --allow-insecure-entitlement=network.host
 
       - name: Login to Docker Hub
         uses: docker/login-action@v4
@@ -179,11 +172,8 @@ jobs:
             NAVIDROME_REPOSITORY=${{ steps.params.outputs.nd_repo }}
             NAVIDROME_CACHEBUST=${{ steps.cache_key.outputs.bust }}
             NAVIDROME_BUILD_CORES=${{ steps.params.outputs.build_cores }}
+            STATIC_COMPRESSION_JOBS=${{ steps.params.outputs.build_cores }}
             GOAMD64_VERSION=v3
-            GOFLAGS=-trimpath
-            CGO_CFLAGS=-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer
-            CGO_CXXFLAGS=-O3 -march=znver3 -mtune=znver3 -fomit-frame-pointer
-            RUSTFLAGS=-C target-cpu=znver3 -C opt-level=3 -C codegen-units=1
             RUST_TARGET_CPU=znver3
 
           cache-from: |

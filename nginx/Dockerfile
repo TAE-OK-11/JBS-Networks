@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.25
 
 # =========================================================
 # JBS Networks NGINX 5.4 Synergy Lite v4
@@ -10,7 +10,7 @@
 #  - Low runtime surface: PCRE2/Brotli/Zstd static linkage
 #  - zlib-rs: official libz_rs shared ABI; no fake libz.so/SONAME
 #  - AWS-LC shared linkage for HTTP/2 + HTTP/3
-#  - Go/Rust official pinned toolchains in builder only
+#  - Rust official pinned toolchain in the builder only
 #  - Root master + nginx workers; /etc/nginx is not worker-writable
 # =========================================================
 
@@ -25,9 +25,6 @@ ARG AWSLC_VERSION=v5.1.0
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG JEMALLOC_SHA256=3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92
-
-ARG GO_VERSION=1.26.5
-ARG GO_LINUX_AMD64_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
 
 ARG RUST_VERSION=1.97.0
 ARG RUSTUP_VERSION=1.29.0
@@ -83,8 +80,6 @@ ARG AWSLC_VERSION
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
 ARG JEMALLOC_MALLOC_CONF
-ARG GO_VERSION
-ARG GO_LINUX_AMD64_SHA256
 ARG RUST_VERSION
 ARG RUSTUP_VERSION
 ARG RUSTUP_INIT_X86_64_SHA256
@@ -116,7 +111,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN case "${TARGETARCH:-amd64}" in \
       amd64|"") echo "Building for linux/amd64 / AMD Zen1";; \
@@ -150,18 +145,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /tmp
 
 # ---------------------------------------------------------
-# 0) Official Go and Rust toolchains
+# 0) Official Rust toolchain
 # ---------------------------------------------------------
-RUN set -eux; \
-    curl -fsSLo /tmp/go.tar.gz \
-      "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
-    echo "${GO_LINUX_AMD64_SHA256}  /tmp/go.tar.gz" | sha256sum -c -; \
-    rm -rf /usr/local/go; \
-    tar -C /usr/local -xzf /tmp/go.tar.gz; \
-    rm -f /tmp/go.tar.gz; \
-    go version; \
-    test "$(go env GOARCH)" = amd64
-
 RUN set -eux; \
     RUST_HOST=x86_64-unknown-linux-gnu; \
     curl -fsSLo /tmp/rustup-init \
@@ -220,7 +205,7 @@ RUN set -eux; \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} -fPIC" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} -fPIC" \
@@ -373,7 +358,7 @@ RUN set -eux; \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
@@ -407,7 +392,7 @@ RUN set -eux; \
       -DCMAKE_AR=/usr/bin/llvm-ar \
       -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
       -DCMAKE_NM=/usr/bin/llvm-nm \
-      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+      -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_C_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
       -DCMAKE_CXX_FLAGS="${CPU_FLAGS} ${LTO_FLAGS}" \
@@ -562,7 +547,6 @@ ARG PCRE2_VERSION
 ARG AWSLC_VERSION
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_MALLOC_CONF
-ARG GO_VERSION
 ARG RUST_VERSION
 ARG ZLIBRS_VERSION
 ARG CARGOC_VERSION
@@ -710,7 +694,6 @@ LABEL project="JBS Networks NGINX 5.4 Synergy Lite v4" \
       nginx.version="${NGINX_VERSION}" \
       pcre2.version="${PCRE2_VERSION}" \
       awslc.version="${AWSLC_VERSION}" \
-      go.builder.version="${GO_VERSION}" \
       rust.builder.version="${RUST_VERSION}" \
       zlib-rs.version="${ZLIBRS_VERSION}" \
       cargo-c.version="${CARGOC_VERSION}" \

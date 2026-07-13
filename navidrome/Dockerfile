@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.25
 
 # =========================================================
-# JBS Networks Navidrome Ultra 6.1 Slim v10.3 Stable Final
+# JBS Networks Navidrome Ultra 6.1 Slim v10.4 Stable Final
 # AMD EPYC Zen3 Dedicated Edition
 #
-# Updated 2026-07-12:
+# Updated 2026-07-13:
 #   - Go 1.26.5
 #   - Node.js 26.5.0
 #   - Rust 1.97.0
@@ -28,10 +28,13 @@
 #   - Validate FFmpeg capabilities at image build time
 #   - Enable isolated 3GiB original-audio hot cache on /cache/hot-music
 #   - Use two scanner I/O workers from 512MiB while keeping GOMAXPROCS cgroup-bound
+#   - Precompress production UI with Brotli 11/9, Zstd 19 and gzip 9
+#   - Drop production source maps and unused builder packages
+#   - Preserve Thin/Fat LTO through the final LLD link
 #
 # NOTE:
 #   Base images are pinned to the current multi-platform index digests
-#   verified on 2026-07-12. Refresh these digests when versions change.
+#   verified on 2026-07-13. Refresh these digests when versions change.
 # =========================================================
 
 ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
@@ -41,7 +44,7 @@ ARG RUST_IMAGE=rust:1.97.0-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=3167abcb6c9289357e865edb019aa0638f6d7f40
+ARG NAVIDROME_CACHEBUST=684a94825f5f3f821d1be2f5102fbc0290a454fb
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -52,6 +55,7 @@ ARG RUSQLITE_VERSION=0.40.1
 ARG WALKDIR_VERSION=2.5.0
 
 ARG NAVIDROME_BUILD_CORES=4
+ARG STATIC_COMPRESSION_JOBS=4
 ARG FFMPEG_THREADS=auto
 ARG GOMEMLIMIT=auto
 ARG GOMAXPROCS=auto
@@ -66,12 +70,12 @@ ARG JBS_GOMEMLIMIT_PERCENT=55
 ARG JBS_GOMEMLIMIT_MIN_MIB=192
 ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
-ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -pipe -fno-plt"
+ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -fno-semantic-interposition -pipe -fno-plt"
 ARG THIN_LTO_FLAGS="-flto=thin"
 ARG FULL_LTO_FLAGS="-flto"
 ARG SQLITE_LTO_FLAGS="-flto=thin"
 ARG TAGLIB_LTO_FLAGS="-flto=thin"
-ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--gc-sections -Wl,--icf=safe -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--build-id=none"
+ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--lto-O3 -Wl,--gc-sections -Wl,--icf=safe -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--build-id=none"
 
 ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_ENABLE_FTS5 \
@@ -127,10 +131,33 @@ RUN echo "NAVIDROME_CACHEBUST=${NAVIDROME_CACHEBUST}" >/dev/null && \
     rm -rf .git
 
 # =========================================================
+# Shared native toolchain
+# =========================================================
+
+FROM ${DEBIAN_IMAGE} AS native-builder-base
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      bzip2 \
+      ca-certificates \
+      clang \
+      file \
+      libc6-dev \
+      lld \
+      llvm \
+      make \
+      nasm \
+      pkg-config \
+      wget \
+      xz-utils
+
+# =========================================================
 # jemalloc
 # =========================================================
 
-FROM ${DEBIAN_IMAGE} AS jemalloc-builder
+FROM native-builder-base AS jemalloc-builder
 
 ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
@@ -138,21 +165,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG THIN_LTO_FLAGS
 ARG LLD_FLAGS
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      build-essential \
-      bzip2 \
-      ca-certificates \
-      clang \
-      libtool \
-      lld \
-      llvm \
-      wget
 
 WORKDIR /build
 
@@ -186,7 +198,7 @@ RUN CC="clang -fuse-ld=lld" \
 # libopus static
 # =========================================================
 
-FROM ${DEBIAN_IMAGE} AS opus-builder
+FROM native-builder-base AS opus-builder
 
 ARG OPUS_VERSION
 ARG OPUS_SHA256
@@ -194,21 +206,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
 ARG LLD_FLAGS
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      build-essential \
-      ca-certificates \
-      clang \
-      libtool \
-      lld \
-      llvm \
-      pkg-config \
-      wget
 
 WORKDIR /build
 
@@ -244,7 +241,7 @@ RUN CC="clang -fuse-ld=lld" \
 # Stable compatibility choice for FFmpeg 8.1.x
 # =========================================================
 
-FROM ${DEBIAN_IMAGE} AS lame-builder
+FROM native-builder-base AS lame-builder
 
 ARG LAME_VERSION
 ARG LAME_SHA256
@@ -252,22 +249,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
 ARG LLD_FLAGS
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      autoconf \
-      automake \
-      build-essential \
-      ca-certificates \
-      clang \
-      libtool \
-      lld \
-      llvm \
-      nasm \
-      pkg-config \
-      wget
 
 WORKDIR /build
 
@@ -327,7 +308,7 @@ RUN mkdir -p /usr/local/lib/pkgconfig && \
 # FFmpeg: audio-focused Opus / MP3 / AAC / FLAC
 # =========================================================
 
-FROM ${DEBIAN_IMAGE} AS ffmpeg-builder
+FROM native-builder-base AS ffmpeg-builder
 
 ARG FFMPEG_VERSION
 ARG FFMPEG_SHA256
@@ -335,22 +316,6 @@ ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
 ARG FULL_LTO_FLAGS
 ARG LLD_FLAGS
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      build-essential \
-      ca-certificates \
-      clang \
-      file \
-      lld \
-      llvm \
-      nasm \
-      pkg-config \
-      wget \
-      xz-utils \
-      yasm
 
 COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
 COPY --from=opus-builder /usr/local/lib/pkgconfig/opus.pc /usr/local/lib/pkgconfig/
@@ -402,6 +367,8 @@ RUN set -eu; \
       --disable-network \
       --disable-debug \
       --disable-doc \
+      --disable-avdevice \
+      --disable-swscale \
       --disable-ffplay \
       --enable-ffprobe \
       --disable-everything \
@@ -431,7 +398,8 @@ RUN set -eu; \
 
 # Keep compilation separate from capability tests.
 RUN make -j"${NAVIDROME_BUILD_CORES}" V=1 && \
-    make install && \
+    install -Dm755 ffmpeg /usr/local/bin/ffmpeg && \
+    install -Dm755 ffprobe /usr/local/bin/ffprobe && \
     test -x /usr/local/bin/ffmpeg && \
     test -x /usr/local/bin/ffprobe && \
     llvm-strip --strip-unneeded /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
@@ -533,10 +501,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      build-essential \
       ca-certificates \
-      musl-tools \
-      pkg-config && \
+      musl-tools && \
     rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /build
@@ -1083,9 +1049,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM ${NODE_IMAGE} AS jsbuilder
 
+ARG STATIC_COMPRESSION_JOBS
+
 WORKDIR /src/ui
 
-ENV NODE_OPTIONS=--max-old-space-size=3072
+ENV NODE_OPTIONS=--max-old-space-size=2048 \
+    ND_UI_SOURCEMAP=false \
+    STATIC_COMPRESSION_JOBS=${STATIC_COMPRESSION_JOBS} \
+    UV_THREADPOOL_SIZE=${STATIC_COMPRESSION_JOBS}
 
 COPY --link --from=source /src/ui/package.json /src/ui/package-lock.json ./
 COPY --link --from=source /src/ui/bin/ ./bin/
@@ -1102,19 +1073,25 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm run build && \
     test -s ./build/index.html && \
     br_count="$(find ./build -type f -name '*.br' | wc -l)" && \
+    zst_count="$(find ./build -type f -name '*.zst' | wc -l)" && \
     gz_count="$(find ./build -type f -name '*.gz' | wc -l)" && \
     test "${br_count}" -gt 0 && \
+    test "${zst_count}" -gt 0 && \
     test "${gz_count}" -gt 0 && \
+    test -z "$(find ./build -type f -name '*.map' -print -quit)" && \
     js_bundle="$(find ./build/assets -type f -name 'index-*.js' -print -quit)" && \
     test -n "${js_bundle}" && \
     test -s "${js_bundle}.br" && \
+    test -s "${js_bundle}.zst" && \
     test -s "${js_bundle}.gz" && \
     css_bundle="$(find ./build/assets -type f -name 'index-*.css' -print -quit)" && \
     test -n "${css_bundle}" && \
     test -s "${css_bundle}.br" && \
+    test -s "${css_bundle}.zst" && \
     test -s "${css_bundle}.gz" && \
-    printf '[jsbuilder] precompressed UI assets: br=%s gz=%s\n' \
+    printf '[jsbuilder] precompressed UI assets: br=%s zstd=%s gz=%s\n' \
       "${br_count}" \
+      "${zst_count}" \
       "${gz_count}"
 
 # =========================================================
@@ -1197,9 +1174,12 @@ COPY --link --from=jsbuilder /src/ui/build ./ui/build/
 
 RUN test -s ./ui/build/index.html && \
     test -n "$(find ./ui/build -type f -name '*.br' -print -quit)" && \
+    test -n "$(find ./ui/build -type f -name '*.zst' -print -quit)" && \
     test -n "$(find ./ui/build -type f -name '*.gz' -print -quit)" && \
-    printf '[gobuilder] embedded UI precompressed assets: br=%s gz=%s\n' \
+    test -z "$(find ./ui/build -type f -name '*.map' -print -quit)" && \
+    printf '[gobuilder] embedded UI precompressed assets: br=%s zstd=%s gz=%s\n' \
       "$(find ./ui/build -type f -name '*.br' | wc -l)" \
+      "$(find ./ui/build -type f -name '*.zst' | wc -l)" \
       "$(find ./ui/build -type f -name '*.gz' | wc -l)"
 
 ENV GOAMD64=${GOAMD64_VERSION} \
@@ -1248,21 +1228,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${DEBIAN_IMAGE} AS release
 
 LABEL org.opencontainers.image.authors="JBS Networks" \
-      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v10.3 Stable Final" \
+      org.opencontainers.image.title="JBS Navidrome Ultra 6.1 Slim v10.4 Stable Final" \
       org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, native AAC/FLAC, jemalloc light profile and Rust helpers" \
       org.opencontainers.image.source="https://github.com/TAE-OK-11/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.3/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/SQLite-Light/HotCache-3GiB/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.4/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/LTO/BR11-Zstd19-Gzip9/NoSourceMaps/SQLite-Light/HotCache-3GiB/Resource-Aware"
+
+COPY --link --from=source /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates \
-      libstdc++6 \
       libwebp7 \
-      libwebpdemux2 \
-      zlib1g && \
+      libwebpdemux2 && \
     rm -rf \
       /var/lib/apt/lists/* \
       /usr/share/doc \
@@ -1335,6 +1314,7 @@ RUN ln -s /usr/local/bin/jbs-helper /usr/local/bin/healthcheck && \
     ln -s /usr/local/bin/jbs-helper /usr/local/bin/jbs-ffmpeg-preflight
 
 RUN test -x /app/navidrome && \
+    test -s /etc/ssl/certs/ca-certificates.crt && \
     test -x /usr/local/bin/ffmpeg.real && \
     test -x /usr/local/bin/ffprobe && \
     test -x /usr/local/bin/jbs-helper && \
