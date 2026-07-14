@@ -44,7 +44,7 @@ ARG RUST_IMAGE=rust:1.97.0-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d
 
 ARG NAVIDROME_REPOSITORY=https://github.com/TAE-OK-11/navidrome.git
 ARG NAVIDROME_REF=master
-ARG NAVIDROME_CACHEBUST=b52280fc44c45d25c2426956fae7e36cdf60e842
+ARG NAVIDROME_CACHEBUST=9ead7488ed028f63478fa748cc391d2eb7f50c25
 
 ARG JEMALLOC_VERSION=5.3.1
 ARG FFMPEG_VERSION=8.1.2
@@ -1930,7 +1930,7 @@ ENV TZ=Asia/Seoul \
     ND_CACHEFOLDER=/cache \
     ND_CONFIGFILE=/data/navidrome.toml \
     ND_DBPATH="file:/data/navidrome.db?mode=rwc&cache=private&_journal_mode=WAL&_synchronous=NORMAL&_locking_mode=NORMAL&_txlock=immediate&_busy_timeout=120000&_foreign_keys=on&_cache_size=-32768&_stmt_cache_size=64&_secure_delete=OFF" \
-    ND_DEVOPTIMIZEDB=false \
+    ND_ENABLESCHEDULEDDBANALYZE=true \
     ND_ENFORCENONROOTUSER=true \
     ND_SCANNER_ENABLED=true \
     ND_SCANNER_SCHEDULE=${SCANSCHEDULE} \
