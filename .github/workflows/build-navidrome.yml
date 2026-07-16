@@ -175,6 +175,8 @@ jobs:
             STATIC_COMPRESSION_JOBS=${{ steps.params.outputs.build_cores }}
             GOAMD64_VERSION=v3
             RUST_TARGET_CPU=znver3
+            GO_PGO_ENABLED=true
+            GO_PGO_BENCHTIME=1s
 
           cache-from: |
             ${{ inputs.force_rebuild != true && 'type=gha,scope=jbs-navidrome-base' || '' }}

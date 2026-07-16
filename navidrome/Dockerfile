@@ -30,7 +30,8 @@
 #   - Use two scanner I/O workers from 512MiB while keeping GOMAXPROCS cgroup-bound
 #   - Precompress production UI with Brotli 11/9, Zstd 19 and gzip 9
 #   - Drop production source maps and unused builder packages
-#   - Preserve Thin/Fat LTO through the final LLD link
+#   - Use LLVM full (fat) LTO for every native component and final CGO link
+#   - Train and apply Go PGO with representative API, streaming and scan workloads
 #
 # NOTE:
 #   Base images are pinned to the current multi-platform index digests
@@ -71,11 +72,10 @@ ARG JBS_GOMEMLIMIT_MIN_MIB=192
 ARG JBS_GOMEMLIMIT_MAX_MIB=4096
 
 ARG CPU_OPTIMIZATION_FLAGS="-O3 -march=znver3 -mtune=znver3 -DNDEBUG -ffunction-sections -fdata-sections -fno-semantic-interposition -pipe -fno-plt"
-ARG THIN_LTO_FLAGS="-flto=thin"
-ARG FULL_LTO_FLAGS="-flto"
-ARG SQLITE_LTO_FLAGS="-flto=thin"
-ARG TAGLIB_LTO_FLAGS="-flto=thin"
+ARG LLVM_FAT_LTO_FLAGS="-flto=full"
 ARG LLD_FLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--lto-O3 -Wl,--gc-sections -Wl,--icf=safe -Wl,--as-needed -Wl,-z,relro,-z,now -Wl,--build-id=none"
+ARG GO_PGO_ENABLED=true
+ARG GO_PGO_BENCHTIME=1s
 
 ARG SQLITE_EXTRA_CFLAGS="\
 -DSQLITE_ENABLE_FTS5 \
@@ -163,7 +163,7 @@ ARG JEMALLOC_VERSION
 ARG JEMALLOC_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG THIN_LTO_FLAGS
+ARG LLVM_FAT_LTO_FLAGS
 ARG LLD_FLAGS
 
 WORKDIR /build
@@ -183,9 +183,9 @@ RUN CC="clang -fuse-ld=lld" \
     RANLIB=llvm-ranlib \
     NM=llvm-nm \
     STRIP=llvm-strip \
-    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${THIN_LTO_FLAGS}" \
-    LDFLAGS="${THIN_LTO_FLAGS} ${LLD_FLAGS}" \
+    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    LDFLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-cxx \
@@ -204,7 +204,7 @@ ARG OPUS_VERSION
 ARG OPUS_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG FULL_LTO_FLAGS
+ARG LLVM_FAT_LTO_FLAGS
 ARG LLD_FLAGS
 
 WORKDIR /build
@@ -224,9 +224,9 @@ RUN CC="clang -fuse-ld=lld" \
     RANLIB=llvm-ranlib \
     NM=llvm-nm \
     STRIP=llvm-strip \
-    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
+    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    LDFLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
@@ -247,7 +247,7 @@ ARG LAME_VERSION
 ARG LAME_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG FULL_LTO_FLAGS
+ARG LLVM_FAT_LTO_FLAGS
 ARG LLD_FLAGS
 
 WORKDIR /build
@@ -267,9 +267,9 @@ RUN CC=clang \
     RANLIB=llvm-ranlib \
     NM=llvm-nm \
     STRIP=llvm-strip \
-    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-    LDFLAGS="${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
+    CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    LDFLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" \
     ./configure \
       --prefix=/usr/local \
       --disable-shared \
@@ -314,7 +314,7 @@ ARG FFMPEG_VERSION
 ARG FFMPEG_SHA256
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG FULL_LTO_FLAGS
+ARG LLVM_FAT_LTO_FLAGS
 ARG LLD_FLAGS
 
 COPY --from=opus-builder /usr/local/lib/libopus.a /usr/local/lib/
@@ -374,8 +374,8 @@ RUN set -eu; \
       --disable-everything \
       --enable-static \
       --disable-shared \
-      --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${FULL_LTO_FLAGS}" \
-      --extra-ldflags="-L/usr/local/lib ${FULL_LTO_FLAGS} ${LLD_FLAGS}" \
+      --extra-cflags="-I/usr/local/include ${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+      --extra-ldflags="-L/usr/local/lib ${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" \
       --extra-libs="-lm" \
       --enable-avcodec \
       --enable-avformat \
@@ -1105,10 +1105,11 @@ ARG TAGLIB_SHA256
 ARG NAVIDROME_REF
 ARG NAVIDROME_BUILD_CORES
 ARG CPU_OPTIMIZATION_FLAGS
-ARG TAGLIB_LTO_FLAGS
-ARG SQLITE_LTO_FLAGS
+ARG LLVM_FAT_LTO_FLAGS
 ARG LLD_FLAGS
 ARG GOAMD64_VERSION
+ARG GO_PGO_ENABLED
+ARG GO_PGO_BENCHTIME
 ARG SQLITE_EXTRA_CFLAGS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -1149,9 +1150,9 @@ RUN wget --https-only --tries=3 --max-redirect=3 -qO taglib.tar.gz \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_AR=llvm-ar \
       -DCMAKE_RANLIB=llvm-ranlib \
-      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS}" \
-      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${TAGLIB_LTO_FLAGS}" \
-      -DCMAKE_EXE_LINKER_FLAGS="${TAGLIB_LTO_FLAGS} ${LLD_FLAGS}" \
+      -DCMAKE_C_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" \
       -DCMAKE_INSTALL_PREFIX=/usr/local && \
     cmake --build build --parallel "${NAVIDROME_BUILD_CORES}" && \
     cmake --install build && \
@@ -1187,19 +1188,68 @@ ENV GOAMD64=${GOAMD64_VERSION} \
     PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
     CC=clang \
     CXX=clang++ \
-    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${SQLITE_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
-    CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${SQLITE_LTO_FLAGS}" \
-    CGO_LDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
+    CGO_CFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS} ${SQLITE_EXTRA_CFLAGS}" \
+    CGO_CXXFLAGS="${CPU_OPTIMIZATION_FLAGS} ${LLVM_FAT_LTO_FLAGS}" \
+    CGO_LDFLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS} -L/usr/local/lib -lstdc++ -lz -lm"
+
+# Generate a reproducible Go PGO profile from Navidrome's own representative
+# hot-path benchmarks. Separate profiles keep each workload visible before
+# pprof merges them into the profile consumed by the final application build.
+RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    set -eux; \
+    if [ "${GO_PGO_ENABLED}" != "true" ]; then \
+      echo '[gobuilder] Go PGO training disabled'; \
+      exit 0; \
+    fi; \
+    mkdir -p /tmp/pgo; \
+    BUILD_TAGS='netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 embed'; \
+    train() { \
+      name="$1"; \
+      package="$2"; \
+      benchmark="$3"; \
+      benchtime="$4"; \
+      go test \
+        -run='^$' \
+        -bench="${benchmark}" \
+        -benchtime="${benchtime}" \
+        -count=1 \
+        -tags="${BUILD_TAGS}" \
+        -cpuprofile="/tmp/pgo/${name}.pprof" \
+        "${package}"; \
+      test -s "/tmp/pgo/${name}.pprof"; \
+    }; \
+    train compression ./server '^BenchmarkCompressionLargeSingleWrite$' "${GO_PGO_BENCHTIME}"; \
+    train api ./server/subsonic '^BenchmarkSubsonicJSONMarshal$' "${GO_PGO_BENCHTIME}"; \
+    train scanner ./scanner '^BenchmarkScan$' "${GO_PGO_BENCHTIME}"; \
+    train hotcache ./core/stream/hotcache '^BenchmarkResolverDirectAndHotHit$' 250ms; \
+    go tool pprof \
+      -proto \
+      -output=/tmp/default.pgo \
+      /tmp/pgo/compression.pprof \
+      /tmp/pgo/api.pprof \
+      /tmp/pgo/scanner.pprof \
+      /tmp/pgo/hotcache.pprof; \
+    test -s /tmp/default.pgo; \
+    go tool pprof -top -nodecount=20 /tmp/default.pgo; \
+    printf '[gobuilder] merged Go PGO profile: %s bytes\n' "$(wc -c </tmp/default.pgo)"
 
 RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     GIT_SHA="$(cat /src/.git_sha 2>/dev/null || echo dev)" && \
     SOURCE_DATE_EPOCH="$(cat /src/.git_epoch 2>/dev/null || echo 0)" && \
-    EXTLDFLAGS="${SQLITE_LTO_FLAGS} ${LLD_FLAGS}" && \
+    EXTLDFLAGS="${LLVM_FAT_LTO_FLAGS} ${LLD_FLAGS}" && \
+    if [ "${GO_PGO_ENABLED}" = "true" ]; then \
+      test -s /tmp/default.pgo; \
+      PGO_FLAG='-pgo=/tmp/default.pgo'; \
+    else \
+      PGO_FLAG='-pgo=off'; \
+    fi && \
     export SOURCE_DATE_EPOCH && \
     mkdir -p /out && \
     GOOS=linux GOARCH=amd64 go build \
       -p "${NAVIDROME_BUILD_CORES}" \
+      "${PGO_FLAG}" \
       -trimpath \
       -buildvcs=false \
       -tags="netgo osusergo sqlite_fts5 sqlite_foreign_keys sqlite_stat4 embed" \
@@ -1232,7 +1282,7 @@ LABEL org.opencontainers.image.authors="JBS Networks" \
       org.opencontainers.image.description="AMD EPYC Zen3 optimized Navidrome with static Opus/MP3, native AAC/FLAC, jemalloc light profile and Rust helpers" \
       org.opencontainers.image.source="https://github.com/TAE-OK-11/navidrome" \
       org.opencontainers.image.vendor="JBS Networks" \
-      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.4/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/LTO/BR11-Zstd19-Gzip9/NoSourceMaps/SQLite-Light/HotCache-3GiB/Resource-Aware"
+      jbs.optimization="JBS-Navidrome-Ultra-6.1-Slim-v10.4/AMD-EPYC-Zen3/Go1.26.5/Node26.5/Rust1.97/FFmpeg8.1.2/LLVM-FatLTO/Go-PGO/BR11-Zstd19-Gzip9/NoSourceMaps/SQLite-Light/HotCache-3GiB/Resource-Aware"
 
 COPY --link --from=source /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
