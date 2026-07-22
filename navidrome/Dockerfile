@@ -2,7 +2,7 @@
 
 # =========================================================
 # JBS Networks Navidrome Ultra 6.1 Slim v10.4 Stable Final
-# AMD EPYC Zen3 Dedicated Edition
+# AMD EPYC Zen3 Dedicated Edition 2
 #
 # Updated 2026-07-13:
 #   - Go 1.26.5
